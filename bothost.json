@@ -1,0 +1,29 @@
+{
+  "name": "avito-assistant",
+  "description": "Telegram-бот — помощник частного продавца Avito",
+  "runtime": "python",
+  "python_version": "3.11",
+  "main": "app.main:app",
+  "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT",
+  "healthcheck_path": "/health",
+  "healthcheck_interval": 30,
+  "install_command": "pip install --no-cache-dir -r requirements.txt",
+  "env_file": ".env",
+  "auto_restart": true,
+  "webhook": true,
+  "resources": {
+    "memory_mb": 1024,
+    "disk_mb": 5120
+  },
+  "required_env": [
+    "TELEGRAM_BOT_TOKEN",
+    "ADMIN_TELEGRAM_ID",
+    "DATABASE_URL",
+    "YANDEX_API_KEY",
+    "YANDEX_FOLDER_ID",
+    "YOOKASSA_SHOP_ID",
+    "YOOKASSA_SECRET_KEY",
+    "WEBHOOK_BASE_URL",
+    "WEBHOOK_SECRET"
+  ]
+}

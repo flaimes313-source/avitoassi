@@ -1,0 +1,41 @@
+# Секреты
+.env
+.env.local
+.env.*.local
+
+# Виртуальное окружение
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Логи
+*.log
+logs/
+
+# BotHost
+.bothost/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Временные файлы фото
+tmp/
+temp/
+uploads/
