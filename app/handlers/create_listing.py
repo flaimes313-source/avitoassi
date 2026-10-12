@@ -28,11 +28,52 @@ from app.utils.keyboards import (
 router = Router(name="create_listing")
 
 
-# ============================================================
-# СОСТОЯНИЯ
-# ============================================================
 class CreateStates(StatesGroup):
-    collecting = State()
+    collecting = State()      # сбор материалов
+    choosing = State()        # выбор варианта
+    editing = State()         # редактирование выбранного
+
+
+# ============================================================
+# УТИЛИТА: получить task_id из state ИЛИ из БД
+# ============================================================
+async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
+    """
+    Пытается получить task_id из FSM.
+    Если нет — ищет последнюю активную задачу create_listing
+    в БД для этого пользователя.
+    """
+    data = await state.get_data()
+    task_id = data.get("task_id")
+
+    if task_id:
+        # Проверяем, что задача реально активна
+        task = await db.fetch_one(
+            "SELECT id FROM tasks WHERE id = %s AND status = 'active'",
+            (task_id,),
+        )
+        if task:
+            return task_id
+        logger.warning(f"task_id={task_id} из state не активен, ищу в БД")
+
+    # Ищем в БД
+    task = await db.fetch_one(
+        """
+        SELECT id FROM tasks
+        WHERE user_id = %s
+          AND task_type = 'create_listing'
+          AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    if task:
+        logger.info(f"task_id найден в БД: {task['id']}")
+        await state.update_data(task_id=task["id"])
+        return task["id"]
+
+    return None
 
 
 # ============================================================
@@ -58,7 +99,6 @@ async def start_create(
         await message.answer("Ошибка: пользователь не найден. Напишите /start.")
         return
 
-    # Проверка лимита
     check = await task_manager.check_limit(user, "create_listing")
     if not check.allowed:
         await message.answer(
@@ -67,7 +107,7 @@ async def start_create(
         )
         return
 
-    # Активная задача — предлагаем продолжить
+    # Активная задача
     if check.existing_task:
         task = check.existing_task
         collected = task.get("collected_data") or {}
@@ -97,6 +137,7 @@ async def start_create(
     )
     await state.update_data(task_id=task["id"])
     await state.set_state(CreateStates.collecting)
+    logger.info(f"Создана задача id={task['id']}")
 
     await message.answer(
         "📝 <b>Создаём объявление</b>\n\n"
@@ -118,10 +159,10 @@ async def on_photo_received(
     user: dict,
     db,
 ) -> None:
-    data = await state.get_data()
-    task_id = data.get("task_id")
+    task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
         await message.answer("Ошибка: задача не найдена. Начните заново.")
+        await state.clear()
         return
 
     photo = message.photo[-1]
@@ -172,7 +213,6 @@ async def on_text_received(
     user: dict,
     db,
 ) -> None:
-    # Игнорируем Reply-кнопки главного меню
     if message.text in {
         "📝 Создать объявление", "🛠 Улучшить объявление",
         "🔍 Анализ конкурентов", "📸 Помощь с фотографиями",
@@ -182,10 +222,10 @@ async def on_text_received(
     }:
         return
 
-    data = await state.get_data()
-    task_id = data.get("task_id")
+    task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
         await message.answer("Ошибка: задача не найдена. Начните заново.")
+        await state.clear()
         return
 
     task = await db.fetch_one("SELECT collected_data FROM tasks WHERE id = %s", (task_id,))
@@ -231,41 +271,45 @@ async def prompt_add_text(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # ============================================================
-# КНОПКА ГЕНЕРАЦИИ
+# ГЕНЕРАЦИЯ
 # ============================================================
 @router.callback_query(F.data == CB.CREATE_DONE_MATERIALS)
 @router.callback_query(F.data == CB.CREATE_GENERATE)
-async def materials_done(callback: CallbackQuery, state: FSMContext) -> None:
-    logger.info(f"materials_done вызван: user={callback.from_user.id}, data={callback.data}")
+async def materials_done(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    logger.info(f"materials_done: user={callback.from_user.id}")
 
-    # Убедимся, что состояние установлено
-    current_state = await state.get_state()
-    logger.info(f"   текущее состояние: {current_state}")
+    task_id = await _resolve_task_id(state, user["id"])
+    if not task_id:
+        await callback.answer("Задача не найдена. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+
+    await state.update_data(task_id=task_id)
+    await state.set_state(CreateStates.choosing)
 
     await callback.answer("Запускаю генерацию…")
     await callback.message.answer(
         "✅ Материалы собраны.\n\n"
         "Запускаю генерацию трёх вариантов. Это займёт до 30 секунд…"
     )
-    await _run_generation(callback.message, state)
+    await _run_generation(callback.message, state, task_id)
 
 
-# ============================================================
-# ГЕНЕРАЦИЯ
-# ============================================================
-async def _run_generation(message: Message, state: FSMContext) -> None:
-    logger.info("_run_generation: старт")
-
-    data = await state.get_data()
-    task_id = data.get("task_id")
-    if not task_id:
-        logger.warning("_run_generation: task_id не найден")
-        await message.answer("Ошибка: задача не найдена.")
-        return
+async def _run_generation(
+    message: Message,
+    state: FSMContext,
+    task_id: int,
+) -> None:
+    logger.info(f"_run_generation: task_id={task_id}")
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
     if not task:
-        logger.warning(f"_run_generation: задача {task_id} не найдена в БД")
+        logger.warning(f"задача {task_id} не найдена в БД")
+        await message.answer("Ошибка: задача не найдена.")
         return
 
     collected = task["collected_data"] or {}
@@ -287,7 +331,6 @@ async def _run_generation(message: Message, state: FSMContext) -> None:
         "photos_count": len(photos),
     }
     user_prompt = build_user_prompt(prompt_data)
-    logger.info(f"_run_generation: промпт собран, длина {len(user_prompt)}")
 
     try:
         logger.info("_run_generation: вызов GigaChat…")
@@ -322,6 +365,7 @@ async def _run_generation(message: Message, state: FSMContext) -> None:
         return
 
     await task_manager.set_result(task_id, {"variants": variants})
+    await state.update_data(task_id=task_id, variants=variants)
 
     approach_names = {
         "factual": "1️⃣ Фактический",
@@ -355,14 +399,13 @@ async def pick_variant(
     callback: CallbackQuery,
     state: FSMContext,
     user: dict,
-    db,
 ) -> None:
     logger.info(f"pick_variant: {callback.data}")
 
-    data = await state.get_data()
-    task_id = data.get("task_id")
+    task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
         await callback.answer("Задача потеряна. Начните заново.", show_alert=True)
+        await state.clear()
         return
 
     idx = {CB.LISTING_PICK_1: 0, CB.LISTING_PICK_2: 1, CB.LISTING_PICK_3: 2}[callback.data]
@@ -402,17 +445,21 @@ async def pick_variant(
         ),
     )
 
-    # Задача успешно завершена — списываем лимит
     await task_manager.complete_task(
         task_id, status="done",
         result={"variants": variants, "selected_index": idx},
     )
 
-    await state.update_data(item_id=item["id"], selected_variant=variant)
+    await state.update_data(
+        item_id=item["id"],
+        selected_variant=variant,
+        selected_variant_index=idx,
+    )
+    await state.set_state(CreateStates.editing)
 
     await callback.message.answer(
         f"✅ Выбран вариант: <b>{variant.get('title', '')}</b>\n\n"
-        f"Сохранено в карточку товара. Что дальше?",
+        f"Сохранено в карточку товара.",
         reply_markup=listing_after_pick(),
     )
     await callback.answer("Сохранено")
@@ -432,29 +479,108 @@ async def show_again(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+# ============================================================
+# ПЕРЕГЕНЕРАЦИЯ
+# ============================================================
 @router.callback_query(F.data == CB.LISTING_REGEN)
-async def regenerate(callback: CallbackQuery, state: FSMContext) -> None:
+async def regenerate(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    logger.info(f"regenerate: user={callback.from_user.id}")
+
+    task_id = await _resolve_task_id(state, user["id"])
+    if not task_id:
+        await callback.answer("Задача не найдена. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+
+    await state.update_data(task_id=task_id)
     await callback.answer("Генерирую заново…")
     await callback.message.answer(
         "🔄 Генерирую заново… Это не потратит лимит — ты внутри той же задачи."
     )
-    await _run_generation(callback.message, state)
+    await _run_generation(callback.message, state, task_id)
 
 
 # ============================================================
-# ОТМЕНА СЦЕНАРИЯ (только в состоянии collecting)
+# РЕДАКТИРОВАНИЕ
+# ============================================================
+@router.callback_query(F.data == CB.LISTING_EDIT)
+async def edit_listing(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    variant = data.get("selected_variant")
+
+    if not variant:
+        await callback.answer("Сначала выбери вариант", show_alert=True)
+        return
+
+    await state.update_data(
+        edit_target="body",
+        edit_item_id=data.get("item_id"),
+    )
+    await callback.message.answer(
+        "✏️ <b>Редактирование</b>\n\n"
+        "Пришли новый текст объявления одним сообщением — я заменю выбранный вариант.\n\n"
+        "Если хочешь изменить заголовок — напиши его отдельным сообщением, "
+        "начиная со слова «Заголовок:».",
+    )
+    await callback.answer()
+
+
+@router.message(CreateStates.editing, F.text)
+async def on_edit_text(
+    message: Message,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    data = await state.get_data()
+    item_id = data.get("item_id")
+
+    if not item_id:
+        await message.answer("Ошибка: карточка не найдена.")
+        await state.clear()
+        return
+
+    if text.lower().startswith("заголовок:"):
+        new_title = text.split(":", 1)[1].strip()
+        await db.execute(
+            "UPDATE listings SET title = %s WHERE item_id = %s AND is_selected = TRUE",
+            (new_title, item_id),
+        )
+        await message.answer(f"✅ Заголовок обновлён:\n<b>{new_title}</b>")
+    else:
+        await db.execute(
+            "UPDATE listings SET body = %s WHERE item_id = %s AND is_selected = TRUE",
+            (text, item_id),
+        )
+        await message.answer("✅ Текст объявления обновлён.")
+
+    await message.answer(
+        "Можно продолжать редактировать или вернуться в меню.",
+        reply_markup=main_menu_reply(),
+    )
+    await state.clear()
+
+
+# ============================================================
+# ОТМЕНА СЦЕНАРИЯ
 # ============================================================
 @router.callback_query(F.data == CB.CANCEL, CreateStates.collecting)
+@router.callback_query(F.data == CB.CANCEL, CreateStates.choosing)
 async def cancel_create(
     callback: CallbackQuery,
     state: FSMContext,
     user: dict,
-    db,
 ) -> None:
     logger.info(f"cancel_create: user={callback.from_user.id}")
 
-    data = await state.get_data()
-    task_id = data.get("task_id")
+    task_id = await _resolve_task_id(state, user["id"])
     if task_id:
         await task_manager.complete_task(task_id, status="cancelled")
         logger.info(f"Задача {task_id} отменена")
