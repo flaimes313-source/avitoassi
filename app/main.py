@@ -19,6 +19,9 @@ from app.config import settings
 from app.database import db
 
 
+# ============================================================
+# BOT И DISPATCHER
+# ============================================================
 bot = Bot(
     token=settings.telegram_bot_token,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -27,10 +30,19 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 
 
+# ============================================================
+# LIFESPAN (старт/остановка)
+# ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Управляет жизненным циклом приложения.
+    Все ошибки на старте логируем, но не роняем контейнер —
+    пул досоздастся лениво при первом запросе.
+    """
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
 
+    # --- Старт ---
     try:
         await db.connect()
     except Exception as e:
@@ -60,13 +72,16 @@ async def lifespan(app: FastAPI):
         logger.error(f"Ошибка при работе с webhook: {e}")
 
     logger.success("Приложение готово к работе")
+
     yield
 
+    # --- Остановка ---
     logger.info("Остановка приложения...")
 
     try:
         if settings.bot_mode == "webhook":
             await bot.delete_webhook()
+            logger.info("Webhook удалён")
     except Exception as e:
         logger.warning(f"Не удалось удалить webhook: {e}")
 
@@ -89,6 +104,9 @@ async def lifespan(app: FastAPI):
     logger.success("Приложение остановлено")
 
 
+# ============================================================
+# FASTAPI
+# ============================================================
 app = FastAPI(
     title="Авито-Помощник",
     version="0.1.0",
@@ -98,25 +116,31 @@ app = FastAPI(
 )
 
 
-_dp_configured = False
-
-
+# ============================================================
+# РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
+# ============================================================
 def _setup_dispatcher() -> None:
-    global _dp_configured
-    if _dp_configured:
-        logger.debug("Dispatcher уже настроен, повторная настройка пропущена")
-        return
+    """
+    Регистрирует middlewares и роутеры.
 
+    Идемпотентна: если роутер уже привязан к диспетчеру
+    (например, при повторном импорте модуля), просто пропускаем.
+    """
+    # --- Middlewares ---
     from app.middlewares.subscription import SubscriptionMiddleware
     from app.middlewares.task_context import TaskContextMiddleware
     from app.middlewares.throttling import ThrottlingMiddleware
     from app.middlewares.db import DbSessionMiddleware
 
-    dp.update.outer_middleware(ThrottlingMiddleware())
-    dp.update.outer_middleware(DbSessionMiddleware())
-    dp.update.outer_middleware(SubscriptionMiddleware())
-    dp.update.outer_middleware(TaskContextMiddleware())
+    try:
+        dp.update.outer_middleware(ThrottlingMiddleware())
+        dp.update.outer_middleware(DbSessionMiddleware())
+        dp.update.outer_middleware(SubscriptionMiddleware())
+        dp.update.outer_middleware(TaskContextMiddleware())
+    except Exception as e:
+        logger.debug(f"Middlewares уже добавлены: {e}")
 
+    # --- Роутеры ---
     from app.handlers import (
         admin,
         buyer_replies,
@@ -133,29 +157,43 @@ def _setup_dispatcher() -> None:
         support,
     )
 
-    dp.include_router(admin.router)
-    dp.include_router(start.router)
-    dp.include_router(settings_handler.router)
-    dp.include_router(subscription.router)
-    dp.include_router(create_listing.router)
-    dp.include_router(improve_listing.router)
-    dp.include_router(competitors.router)
-    dp.include_router(photos.router)
-    dp.include_router(strategy.router)
-    dp.include_router(buyer_replies.router)
-    dp.include_router(items_history.router)
-    dp.include_router(reminders.router)
-    dp.include_router(support.router)
+    routers = [
+        admin.router,
+        start.router,
+        settings_handler.router,
+        subscription.router,
+        create_listing.router,
+        improve_listing.router,
+        competitors.router,
+        photos.router,
+        strategy.router,
+        buyer_replies.router,
+        items_history.router,
+        reminders.router,
+        support.router,
+    ]
 
-    _dp_configured = True
+    for router in routers:
+        try:
+            dp.include_router(router)
+        except RuntimeError as e:
+            if "already attached" in str(e):
+                logger.debug(f"Роутер уже привязан, пропускаю: {e}")
+                continue
+            raise
+
     logger.info("Все роутеры и middlewares зарегистрированы")
 
 
 _setup_dispatcher()
 
 
+# ============================================================
+# HEALTHCHECK
+# ============================================================
 @app.get("/health", tags=["service"])
 async def health() -> JSONResponse:
+    """Healthcheck для BotHost."""
     try:
         await db.fetch_val("SELECT 1")
         return JSONResponse(
@@ -174,8 +212,12 @@ async def root() -> JSONResponse:
     return JSONResponse({"service": "avito-assistant", "status": "running"})
 
 
+# ============================================================
+# WEBHOOK ОТ TELEGRAM
+# ============================================================
 @app.post(settings.webhook_path, tags=["telegram"])
 async def telegram_webhook(request: Request) -> Response:
+    """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
         logger.warning("Webhook: неверный секрет")
@@ -192,18 +234,27 @@ async def telegram_webhook(request: Request) -> Response:
     return Response(status_code=status.HTTP_200_OK)
 
 
+# ============================================================
+# WEBHOOK ОТ YOOKASSA
+# ============================================================
 @app.post("/yookassa/webhook", tags=["yookassa"])
 async def yookassa_webhook(request: Request) -> Response:
+    """Принимает коллбэки от ЮKassa."""
     try:
         data = await request.json()
         logger.info(f"ЮKassa webhook: {data.get('event')}")
+
         from app.services.yookassa_service import process_webhook
         await process_webhook(data)
     except Exception as e:
         logger.exception(f"Ошибка обработки webhook ЮKassa: {e}")
+
     return Response(status_code=status.HTTP_200_OK)
 
 
+# ============================================================
+# ЛОКАЛЬНЫЙ ЗАПУСК (polling / dev-режим)
+# ============================================================
 if __name__ == "__main__":
     if settings.bot_mode == "polling":
         logger.info("Запуск long polling...")
@@ -214,5 +265,5 @@ if __name__ == "__main__":
             "app.main:app",
             host="0.0.0.0",
             port=8000,
-            reload=settings.is_dev,
+            reload=False,
         )
