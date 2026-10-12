@@ -19,9 +19,6 @@ from app.config import settings
 from app.database import db
 
 
-# ============================================================
-# BOT И DISPATCHER
-# ============================================================
 bot = Bot(
     token=settings.telegram_bot_token,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -30,9 +27,6 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 
 
-# ============================================================
-# LIFESPAN (старт/остановка)
-# ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
@@ -41,7 +35,6 @@ async def lifespan(app: FastAPI):
         await db.connect()
     except Exception as e:
         logger.error(f"Не удалось подключиться к БД на старте: {e}")
-        logger.warning("Пул откроется лениво при первом запросе")
 
     try:
         from app.services.scheduler import scheduler_service
@@ -57,6 +50,7 @@ async def lifespan(app: FastAPI):
                 url=settings.webhook_url,
                 secret_token=settings.webhook_secret,
                 drop_pending_updates=True,
+                allowed_updates=["message", "callback_query", "edited_message"],
             )
             logger.info(f"Webhook зарегистрирован: {settings.webhook_url}")
         else:
@@ -70,13 +64,6 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Остановка приложения...")
-
-    try:
-        if settings.bot_mode == "webhook":
-            await bot.delete_webhook()
-            logger.info("Webhook удалён")
-    except Exception as e:
-        logger.warning(f"Не удалось удалить webhook: {e}")
 
     try:
         from app.services.scheduler import scheduler_service
@@ -97,9 +84,6 @@ async def lifespan(app: FastAPI):
     logger.success("Приложение остановлено")
 
 
-# ============================================================
-# FASTAPI
-# ============================================================
 app = FastAPI(
     title="Авито-Помощник",
     version="0.1.0",
@@ -109,27 +93,13 @@ app = FastAPI(
 )
 
 
-# ============================================================
-# РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
-# ============================================================
 def _setup_dispatcher() -> None:
     """
-    Регистрирует middlewares и роутеры.
-    Идемпотентна: повторный вызов не падает.
+    Регистрирует роутеры, ПОТОМ middlewares.
+
+    Порядок важен: middlewares, добавленные ДО include_router,
+    в aiogram 3.15 могут применяться некорректно.
     """
-    from app.middlewares.subscription import SubscriptionMiddleware
-    from app.middlewares.task_context import TaskContextMiddleware
-    from app.middlewares.throttling import ThrottlingMiddleware
-    from app.middlewares.db import DbSessionMiddleware
-
-    try:
-        dp.update.outer_middleware(ThrottlingMiddleware())
-        dp.update.outer_middleware(DbSessionMiddleware())
-        dp.update.outer_middleware(SubscriptionMiddleware())
-        dp.update.outer_middleware(TaskContextMiddleware())
-    except Exception as e:
-        logger.debug(f"Middlewares уже добавлены: {e}")
-
     from app.handlers import (
         admin,
         buyer_replies,
@@ -171,6 +141,20 @@ def _setup_dispatcher() -> None:
                 continue
             raise
 
+    # Middlewares — ПОСЛЕ роутеров
+    from app.middlewares.subscription import SubscriptionMiddleware
+    from app.middlewares.task_context import TaskContextMiddleware
+    from app.middlewares.throttling import ThrottlingMiddleware
+    from app.middlewares.db import DbSessionMiddleware
+
+    try:
+        dp.update.outer_middleware(ThrottlingMiddleware())
+        dp.update.outer_middleware(DbSessionMiddleware())
+        dp.update.outer_middleware(SubscriptionMiddleware())
+        dp.update.outer_middleware(TaskContextMiddleware())
+    except Exception as e:
+        logger.debug(f"Middlewares уже добавлены: {e}")
+
     logger.info("Все роутеры и middlewares зарегистрированы")
 
 
@@ -178,19 +162,27 @@ _setup_dispatcher()
 
 
 # ============================================================
-# HEALTHCHECK
+# Временный fallback для диагностики
 # ============================================================
+from aiogram import F as _F
+from aiogram.types import Message as _Message
+
+@dp.message(_F.text)
+async def _debug_fallback(message: _Message) -> None:
+    logger.warning(
+        f"🔔 FALLBACK сработал: text={message.text!r}, "
+        f"from_user={message.from_user.id if message.from_user else None}"
+    )
+
+
 @app.get("/health", tags=["service"])
 async def health() -> JSONResponse:
     try:
         await db.fetch_val("SELECT 1")
-        return JSONResponse(
-            {"status": "ok", "db": "ok", "env": settings.environment}
-        )
+        return JSONResponse({"status": "ok", "db": "ok"})
     except Exception as e:
-        logger.error(f"Healthcheck не прошёл: {e}")
         return JSONResponse(
-            {"status": "degraded", "db": "error", "detail": str(e)},
+            {"status": "degraded", "detail": str(e)},
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
@@ -200,12 +192,8 @@ async def root() -> JSONResponse:
     return JSONResponse({"service": "avito-assistant", "status": "running"})
 
 
-# ============================================================
-# WEBHOOK ОТ TELEGRAM
-# ============================================================
 @app.post(settings.webhook_path, tags=["telegram"])
 async def telegram_webhook(request: Request) -> Response:
-    """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
         logger.warning("Webhook: неверный секрет")
@@ -213,68 +201,37 @@ async def telegram_webhook(request: Request) -> Response:
 
     try:
         data = await request.json()
-
         update_id = data.get("update_id")
-        update_type = next(
-            (k for k in data.keys() if k != "update_id"),
-            "unknown",
-        )
-        logger.info(f"📥 Апдейт id={update_id}, тип={update_type}")
-
-        if update_type == "message":
-            msg = data["message"]
-            logger.info(
-                f"   message.text={msg.get('text')!r}, "
-                f"from_user={msg.get('from', {}).get('id')}"
-            )
+        logger.info(f"📥 Апдейт id={update_id}, keys={list(data.keys())}")
 
         update = Update.model_validate(data, context={"bot": bot})
-        logger.info(f"🔍 Update parsed, has_message={update.message is not None}")
+        logger.info(f"🔍 has_message={update.message is not None}")
 
-        # КЛЮЧЕВОЕ: feed_webhook_update вместо feed_update
         await dp.feed_webhook_update(bot, update)
         logger.info(f"✅ Апдейт {update_id} обработан")
 
     except Exception as e:
         logger.exception(f"❌ Ошибка обработки апдейта: {e}")
-        return Response(status_code=status.HTTP_200_OK)
 
     return Response(status_code=status.HTTP_200_OK)
 
 
-# ============================================================
-# WEBHOOK ОТ YOOKASSA
-# ============================================================
 @app.post("/yookassa/webhook", tags=["yookassa"])
 async def yookassa_webhook(request: Request) -> Response:
     try:
         data = await request.json()
-        logger.info(f"ЮKassa webhook: {data.get('event')}")
-
         from app.services.yookassa_service import process_webhook
         await process_webhook(data)
     except Exception as e:
-        logger.exception(f"Ошибка обработки webhook ЮKassa: {e}")
-
+        logger.exception(f"Ошибка webhook ЮKassa: {e}")
     return Response(status_code=status.HTTP_200_OK)
 
 
-# ============================================================
-# ЛОКАЛЬНЫЙ ЗАПУСК (polling / dev-режим)
-# ============================================================
 if __name__ == "__main__":
     if settings.bot_mode == "polling":
-        logger.info("Запуск long polling...")
         asyncio.run(dp.start_polling(bot, skip_updates=True))
     else:
         import os
         import uvicorn
-
         port = int(os.getenv("PORT", "3000"))
-        logger.info(f"Запуск webhook на порту {port}")
-        uvicorn.run(
-            "app.main:app",
-            host="0.0.0.0",
-            port=port,
-            reload=False,
-        )
+        uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
