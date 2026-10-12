@@ -11,7 +11,7 @@
     uvicorn app.main:app --reload
 
 Запуск на BotHost (webhook):
-    uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
 """
 
 from __future__ import annotations
@@ -41,8 +41,6 @@ bot = Bot(
 )
 
 # FSM-хранилище: в памяти процесса.
-# Для MVP ок. Позже, если понадобится переживать рестарты в середине диалога,
-# можно переключиться на persistent-хранилище (например, в PostgreSQL).
 dp = Dispatcher(storage=MemoryStorage())
 
 
@@ -52,38 +50,44 @@ dp = Dispatcher(storage=MemoryStorage())
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Управляет жизненным циклом приложения:
-    - на старте: подключаем БД, запускаем scheduler, регистрируем webhook
-    - на остановке: останавливаем scheduler, закрываем БД
+    Управляет жизненным циклом приложения.
+    Все ошибки на старте логируем, но не роняем контейнер —
+    пул досоздастся лениво при первом запросе.
     """
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
 
     # --- Старт ---
-    await db.connect()
+    # Пробуем подключиться к БД. Если упало — не падаем, ленивая
+    # инициализация подстрахует.
+    try:
+        await db.connect()
+    except Exception as e:
+        logger.error(f"Не удалось подключиться к БД на старте: {e}")
+        logger.warning("Пул откроется лениво при первом запросе")
 
-    # Импорты здесь, чтобы избежать циклических зависимостей
-    # (handlers импортируют keyboard, keyboard импортирует bot и т.д.)
-    from app.services.scheduler import scheduler_service
+    # Запуск scheduler
+    try:
+        from app.services.scheduler import scheduler_service
+        await scheduler_service.start()
+    except Exception as e:
+        logger.error(f"Не удалось запустить scheduler: {e}")
 
-    await scheduler_service.start()
-
-    # Регистрируем webhook в Telegram (только если режим webhook)
-    if settings.bot_mode == "webhook":
-        if not settings.webhook_base_url:
-            raise RuntimeError(
-                "BOT_MODE=webhook, но WEBHOOK_BASE_URL не задан в .env"
+    # Работа с webhook Telegram
+    try:
+        if settings.bot_mode == "webhook":
+            if not settings.webhook_base_url:
+                raise RuntimeError("BOT_MODE=webhook, но WEBHOOK_BASE_URL не задан")
+            await bot.set_webhook(
+                url=settings.webhook_url,
+                secret_token=settings.webhook_secret,
+                drop_pending_updates=True,
             )
-        await bot.set_webhook(
-            url=settings.webhook_url,
-            secret_token=settings.webhook_secret,
-            drop_pending_updates=True,
-        )
-        logger.info(f"Webhook зарегистрирован: {settings.webhook_url}")
-
-    # В режиме polling — удаляем webhook, чтобы Telegram шёл через getUpdates
-    if settings.bot_mode == "polling":
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook удалён (режим polling)")
+            logger.info(f"Webhook зарегистрирован: {settings.webhook_url}")
+        else:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Webhook удалён (режим polling)")
+    except Exception as e:
+        logger.error(f"Ошибка при работе с webhook: {e}")
 
     logger.success("Приложение готово к работе")
 
@@ -92,18 +96,29 @@ async def lifespan(app: FastAPI):
     # --- Остановка ---
     logger.info("Остановка приложения...")
 
-    if settings.bot_mode == "webhook":
-        try:
+    try:
+        if settings.bot_mode == "webhook":
             await bot.delete_webhook()
             logger.info("Webhook удалён")
-        except Exception as e:
-            logger.warning(f"Не удалось удалить webhook: {e}")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить webhook: {e}")
 
-    from app.services.scheduler import scheduler_service
-    await scheduler_service.stop()
+    try:
+        from app.services.scheduler import scheduler_service
+        await scheduler_service.stop()
+    except Exception as e:
+        logger.warning(f"Ошибка остановки scheduler: {e}")
 
-    await bot.session.close()
-    await db.close()
+    try:
+        await bot.session.close()
+    except Exception as e:
+        logger.warning(f"Ошибка закрытия сессии бота: {e}")
+
+    try:
+        await db.close()
+    except Exception as e:
+        logger.warning(f"Ошибка закрытия БД: {e}")
+
     logger.success("Приложение остановлено")
 
 
@@ -124,27 +139,20 @@ app = FastAPI(
 # РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
 # ============================================================
 def _setup_dispatcher() -> None:
-    """
-    Регистрирует middlewares, роутеры и глобальные обработчики.
-    Вызывается один раз при импорте модуля.
-    """
+    """Регистрирует middlewares, роутеры и глобальные обработчики."""
     # --- Middlewares ---
     from app.middlewares.subscription import SubscriptionMiddleware
     from app.middlewares.task_context import TaskContextMiddleware
     from app.middlewares.throttling import ThrottlingMiddleware
     from app.middlewares.db import DbSessionMiddleware
 
-    # Порядок важен: сначала throttling (отсекает спам),
-    # потом БД (нужна всем дальше), потом подписка (проверяет лимит),
-    # потом контекст задачи (загружает активную задачу)
+    # Порядок: throttling → db → subscription → task_context
     dp.update.outer_middleware(ThrottlingMiddleware())
     dp.update.outer_middleware(DbSessionMiddleware())
     dp.update.outer_middleware(SubscriptionMiddleware())
     dp.update.outer_middleware(TaskContextMiddleware())
 
     # --- Роутеры ---
-    # Импортируем в порядке приоритета.
-    # Команды и админка — первыми.
     from app.handlers import (
         admin,
         buyer_replies,
@@ -161,19 +169,19 @@ def _setup_dispatcher() -> None:
         support,
     )
 
-    dp.include_router(admin.router)          # /admin — только для админа
-    dp.include_router(start.router)          # /start, /help, главное меню
-    dp.include_router(settings_handler.router)  # ⚙️ Настройки
-    dp.include_router(subscription.router)   # 💳 Тариф и оплата
-    dp.include_router(create_listing.router) # 📝 Создать объявление
-    dp.include_router(improve_listing.router) # 🛠 Улучшить
-    dp.include_router(competitors.router)    # 🔍 Конкуренты
-    dp.include_router(photos.router)         # 📸 Фото
-    dp.include_router(strategy.router)       # 📈 Стратегия
-    dp.include_router(buyer_replies.router)  # 💬 Ответы покупателям
-    dp.include_router(items_history.router)  # 📂 Мои объявления
-    dp.include_router(reminders.router)      # ⏰ Напоминания
-    dp.include_router(support.router)        # 💬 Поддержка
+    dp.include_router(admin.router)
+    dp.include_router(start.router)
+    dp.include_router(settings_handler.router)
+    dp.include_router(subscription.router)
+    dp.include_router(create_listing.router)
+    dp.include_router(improve_listing.router)
+    dp.include_router(competitors.router)
+    dp.include_router(photos.router)
+    dp.include_router(strategy.router)
+    dp.include_router(buyer_replies.router)
+    dp.include_router(items_history.router)
+    dp.include_router(reminders.router)
+    dp.include_router(support.router)
 
     logger.info("Все роутеры и middlewares зарегистрированы")
 
@@ -186,13 +194,8 @@ _setup_dispatcher()
 # ============================================================
 @app.get("/health", tags=["service"])
 async def health() -> JSONResponse:
-    """
-    Healthcheck для BotHost.
-    BotHost пингует этот URL раз в 30 секунд.
-    Если 3 раза подряд не ответит — перезапустит контейнер.
-    """
+    """Healthcheck для BotHost."""
     try:
-        # Проверяем, что БД жива
         await db.fetch_val("SELECT 1")
         return JSONResponse(
             {"status": "ok", "db": "ok", "env": settings.environment}
@@ -207,7 +210,6 @@ async def health() -> JSONResponse:
 
 @app.get("/", tags=["service"])
 async def root() -> JSONResponse:
-    """Корневой роут — простая проверка, что сервис отвечает."""
     return JSONResponse({"service": "avito-assistant", "status": "running"})
 
 
@@ -216,11 +218,7 @@ async def root() -> JSONResponse:
 # ============================================================
 @app.post(settings.webhook_path, tags=["telegram"])
 async def telegram_webhook(request: Request) -> Response:
-    """
-    Принимает апдейты от Telegram.
-    Проверяет секрет, чтобы отсечь левые запросы.
-    """
-    # Проверка секрета (Telegram шлёт его в заголовке)
+    """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
         logger.warning("Webhook: неверный секрет")
@@ -231,7 +229,6 @@ async def telegram_webhook(request: Request) -> Response:
         update = Update.model_validate(data, context={"bot": bot})
         await dp.feed_update(bot, update)
     except Exception as e:
-        # Не роняем webhook при ошибке обработки — Telegram будет ретраить
         logger.exception(f"Ошибка обработки апдейта: {e}")
         return Response(status_code=status.HTTP_200_OK)
 
@@ -243,25 +240,16 @@ async def telegram_webhook(request: Request) -> Response:
 # ============================================================
 @app.post("/yookassa/webhook", tags=["yookassa"])
 async def yookassa_webhook(request: Request) -> Response:
-    """
-    Принимает коллбэки от ЮKassa.
-
-    Безопасность: ЮKassa не подписывает коллбэки секретом,
-    поэтому защищаемся двумя способами:
-    1. ВСЕГДА проверяем статус платежа через API ЮKassa (server-side check)
-    2. Только после подтверждения активируем PRO
-    """
+    """Принимает коллбэки от ЮKassa."""
     try:
         data = await request.json()
         logger.info(f"ЮKassa webhook: {data.get('event')}")
 
         from app.services.yookassa_service import process_webhook
         await process_webhook(data)
-
     except Exception as e:
         logger.exception(f"Ошибка обработки webhook ЮKassa: {e}")
 
-    # ЮKassa ждёт 200 OK в любом случае, иначе будет ретраить
     return Response(status_code=status.HTTP_200_OK)
 
 

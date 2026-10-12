@@ -3,7 +3,8 @@
 
 Предоставляет:
 - Глобальный пул соединений `db`
-- Хелперы `fetch_one`, `fetch_all`, `execute`
+- Хелперы `fetch_one`, `fetch_all`, `execute`, `execute_returning`, `fetch_val`
+- Ленивую инициализацию пула (важно для uvicorn с несколькими worker'ами)
 - Автоматическое применение схемы при первом старте
 """
 
@@ -13,7 +14,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import psycopg
 from loguru import logger
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -29,6 +29,13 @@ class Database:
         await db.connect()
         row = await db.fetch_one("SELECT * FROM users WHERE id = %s", (1,))
         await db.close()
+
+    Ленивая инициализация:
+        Если пул не открыт — любой из методов (fetch_one, execute и т.д.)
+        автоматически вызовет connect() перед выполнением запроса.
+        Это спасает при запуске uvicorn с несколькими worker-процессами,
+        когда lifespan отрабатывает не в том процессе, что обрабатывает
+        апдейты.
     """
 
     def __init__(self) -> None:
@@ -40,10 +47,10 @@ class Database:
     async def connect(self) -> None:
         """
         Открывает пул соединений и применяет схему БД.
-        Вызывается один раз при старте приложения.
+        Идемпотентно — повторный вызов ничего не ломает.
         """
         if self._pool is not None:
-            logger.warning("Пул уже открыт, повторный вызов connect() проигнорирован")
+            logger.debug("Пул уже открыт, повторный вызов connect() проигнорирован")
             return
 
         logger.info("Подключение к PostgreSQL...")
@@ -52,10 +59,10 @@ class Database:
             conninfo=settings.database_url,
             min_size=settings.db_pool_min_size,
             max_size=settings.db_pool_max_size,
-            open=False,               # откроем явно ниже
+            open=False,
             kwargs={
-                "row_factory": dict_row,   # строки возвращаются как dict
-                "autocommit": True,        # не держим транзакции на простых запросах
+                "row_factory": dict_row,
+                "autocommit": True,
             },
         )
         await self._pool.open(wait=True, timeout=10)
@@ -67,7 +74,7 @@ class Database:
                 row = await cur.fetchone()
                 logger.info(f"PostgreSQL подключён: {row['version'].split(',')[0]}")
 
-        # Применяем схему (idempotent — CREATE TABLE IF NOT EXISTS)
+        # Применяем схему (idempotent)
         await self._apply_schema()
 
         logger.success("Пул соединений готов")
@@ -78,6 +85,19 @@ class Database:
             await self._pool.close()
             self._pool = None
             logger.info("Пул соединений закрыт")
+
+    # --------------------------------------------------------
+    # ЛЕНИВАЯ ИНИЦИАЛИЗАЦИЯ
+    # --------------------------------------------------------
+    async def _get_pool(self) -> AsyncConnectionPool:
+        """
+        Возвращает пул. Если он ещё не открыт — открывает.
+        Это ключевой метод для работы с uvicorn worker'ами.
+        """
+        if self._pool is None:
+            await self.connect()
+        assert self._pool is not None
+        return self._pool
 
     # --------------------------------------------------------
     # ПРИМЕНЕНИЕ СХЕМЫ
@@ -97,7 +117,8 @@ class Database:
         sql = schema_path.read_text(encoding="utf-8")
 
         logger.info("Применение схемы БД...")
-        async with self._pool.connection() as conn:  # type: ignore[union-attr]
+        assert self._pool is not None
+        async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql)
         logger.success("Схема БД применена")
@@ -105,14 +126,6 @@ class Database:
     # --------------------------------------------------------
     # ХЕЛПЕРЫ ЗАПРОСОВ
     # --------------------------------------------------------
-    def _ensure_pool(self) -> AsyncConnectionPool:
-        """Проверяет, что пул открыт."""
-        if self._pool is None:
-            raise RuntimeError(
-                "Пул не открыт. Вызовите await db.connect() при старте приложения."
-            )
-        return self._pool
-
     async def execute(
         self,
         query: str,
@@ -127,7 +140,7 @@ class Database:
                 (12345,),
             )
         """
-        pool = self._ensure_pool()
+        pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
@@ -146,7 +159,7 @@ class Database:
                 (12345,),
             )
         """
-        pool = self._ensure_pool()
+        pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
@@ -166,7 +179,7 @@ class Database:
                 (12345,),
             )
         """
-        pool = self._ensure_pool()
+        pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
@@ -186,7 +199,7 @@ class Database:
                 ("pro",),
             )
         """
-        pool = self._ensure_pool()
+        pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
@@ -205,7 +218,7 @@ class Database:
                 "SELECT COUNT(*) FROM users WHERE tariff = 'pro'"
             )
         """
-        pool = self._ensure_pool()
+        pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
@@ -222,14 +235,12 @@ class Database:
         Контекстный менеджер для явной транзакции.
 
         Пример:
-            async with db.transaction() as conn:
+            async with await db.transaction() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("UPDATE ...")
                     await cur.execute("INSERT ...")
-                # коммит произойдёт автоматически при выходе
-                # или откат при исключении
         """
-        pool = self._ensure_pool()
+        pool = await self._get_pool()
         return pool.connection()
 
 
