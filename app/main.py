@@ -28,13 +28,20 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 # ============================================================
-# ПРОСТЕЙШИЙ ХЕНДЛЕР — ПРЯМО НА DP
+# ПОДКЛЮЧАЕМ start.router
 # ============================================================
-@dp.message(F.text == "/start")
-async def debug_start_handler(message: Message) -> None:
-    logger.info(f"🎯 debug_start_handler СРАБОТАЛ: from_user={message.from_user.id}")
-    await message.answer("DEBUG: обработчик на dp сработал!")
-    logger.info("DEBUG-ответ отправлен")
+from app.handlers import start as start_handlers
+dp.include_router(start_handlers.router)
+logger.info(f"start.router подключён: {start_handlers.router}")
+
+
+# ============================================================
+# ДИАГНОСТИЧЕСКИЙ ХЕНДЛЕР НА DP (для проверки)
+# ============================================================
+@dp.message(F.text == "/ping")
+async def debug_ping(message: Message) -> None:
+    logger.info(f"🎯 debug_ping: from_user={message.from_user.id}")
+    await message.answer("pong")
 
 
 # ============================================================
@@ -47,7 +54,7 @@ async def lifespan(app: FastAPI):
     try:
         await db.connect()
     except Exception as e:
-        logger.error(f"Не удалось подключиться к БД на старте: {e}")
+        logger.error(f"Не удалось подключиться к БД: {e}")
 
     try:
         if settings.bot_mode == "webhook":
@@ -82,29 +89,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-# ============================================================
-# HEALTHCHECK
-# ============================================================
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
-# ============================================================
-# WEBHOOK
-# ============================================================
 @app.post(settings.webhook_path)
 async def telegram_webhook(request: Request) -> Response:
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
-        logger.warning("Webhook: неверный секрет")
         return Response(status_code=status.HTTP_403_FORBIDDEN)
 
     try:
         data = await request.json()
         logger.info(f"📥 Апдейт keys={list(data.keys())}")
 
-        # ПРЯМАЯ передача в dp через feed_webhook_update
         update = Update.model_validate(data, context={"bot": bot})
         await dp.feed_webhook_update(bot, update)
         logger.info("✅ Апдейт обработан")
