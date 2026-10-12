@@ -1,10 +1,5 @@
 """
 Все клавиатуры проекта.
-
-Соглашения:
-- callback_data: короткие латинские идентификаторы без пробелов
-- Reply-клавиатуры используются только для главного меню и запроса телефона
-- Inline-клавиатуры — везде остальное
 """
 
 from aiogram.types import (
@@ -18,23 +13,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 # ============================================================
-# CALLBACK-КОНСТАНТЫ (реестр всех callback_data)
+# CALLBACK-КОНСТАНТЫ
 # ============================================================
 class CB:
     """Реестр callback_data — единый источник правды."""
 
-    # ---- Главное меню (блок 2 ТЗ) ----
+    # ---- Главное меню ----
     MENU_MAIN = "menu:main"
-
-    MENU_CREATE = "menu:create"                # 📝 Создать объявление
-    MENU_IMPROVE = "menu:improve"              # 🛠 Улучшить объявление
-    MENU_COMPETITORS = "menu:competitors"      # 🔍 Анализ конкурентов
-    MENU_PHOTOS = "menu:photos"                # 📸 Помощь с фотографиями
-    MENU_STRATEGY = "menu:strategy"            # 📈 Стратегия продвижения
-    MENU_BUYER_REPLIES = "menu:buyer_replies"  # 💬 Ответы покупателям
-    MENU_ITEMS = "menu:items"                  # 📂 Мои объявления и история
-    MENU_SUBSCRIPTION = "menu:subscription"    # 💳 Тариф и подписка
-    MENU_SETTINGS = "menu:settings"            # ⚙️ Настройки и помощь
+    MENU_CREATE = "menu:create"
+    MENU_IMPROVE = "menu:improve"
+    MENU_COMPETITORS = "menu:competitors"
+    MENU_PHOTOS = "menu:photos"
+    MENU_STRATEGY = "menu:strategy"
+    MENU_BUYER_REPLIES = "menu:buyer_replies"
+    MENU_ITEMS = "menu:items"
+    MENU_SUBSCRIPTION = "menu:subscription"
+    MENU_SETTINGS = "menu:settings"
 
     # ---- Навигация ----
     BACK = "nav:back"
@@ -53,18 +47,30 @@ class CB:
     TASK_NEW = "task:new"
     TASK_ABORT = "task:abort"
 
-    # ---- Создание объявления (блок 3) ----
+    # ---- Создание объявления ----
     CREATE_ADD_PHOTO = "create:add_photo"
+    CREATE_ADD_TEXT = "create:add_text"
     CREATE_DONE_MATERIALS = "create:done_materials"
     CREATE_GENERATE = "create:generate"
+    CREATE_PROCEED_AS_IS = "create:proceed_as_is"
+    CREATE_ANSWER_MORE = "create:answer_more"
+    CREATE_ANSWER_SKIP = "create:answer_skip"
 
-    # ---- Улучшение объявления (блок 4) ----
+    # Выбор варианта (1/2/3)
+    LISTING_PICK_1 = "listing:pick:1"
+    LISTING_PICK_2 = "listing:pick:2"
+    LISTING_PICK_3 = "listing:pick:3"
+    LISTING_REGEN = "listing:regen"
+    LISTING_EDIT = "listing:edit"
+    LISTING_COPY = "listing:copy"
+    LISTING_SAVE = "listing:save"
+
+    # ---- Улучшение объявления ----
     IMPROVE_MATERIAL_TEXT = "improve:text"
     IMPROVE_MATERIAL_LINK = "improve:link"
     IMPROVE_MATERIAL_SCREEN = "improve:screenshot"
     IMPROVE_MATERIAL_STATS = "improve:stats"
 
-    # Диагностика проблемы (блок 4)
     IMPROVE_PROBLEM_LOW_VIEWS = "improve:problem:low_views"
     IMPROVE_PROBLEM_NO_FAVORITES = "improve:problem:no_favorites"
     IMPROVE_PROBLEM_NO_MESSAGES = "improve:problem:no_messages"
@@ -72,21 +78,21 @@ class CB:
     IMPROVE_PROBLEM_LONG = "improve:problem:long"
     IMPROVE_PROBLEM_FASTER = "improve:problem:faster"
 
-    # ---- Анализ конкурентов (блок 5) ----
+    # ---- Анализ конкурентов ----
     COMPETITOR_ADD = "competitor:add"
     COMPETITOR_DONE = "competitor:done"
     COMPETITOR_RUN = "competitor:run"
 
-    # ---- Фото (блок 6) ----
+    # ---- Фото ----
     PHOTOS_UPLOAD = "photos:upload"
     PHOTOS_ANALYZE = "photos:analyze"
     PHOTOS_DONE = "photos:done"
 
-    # ---- Стратегия (блок 7) ----
+    # ---- Стратегия ----
     STRATEGY_RUN = "strategy:run"
     STRATEGY_CHECK_LATER = "strategy:later"
 
-    # ---- Ответы покупателям (блок 8) ----
+    # ---- Ответы покупателям ----
     REPLY_PASTE = "reply:paste"
     REPLY_GOAL_CONFIRM = "reply:goal:confirm"
     REPLY_GOAL_HAGGLE = "reply:goal:haggle"
@@ -96,12 +102,12 @@ class CB:
     REPLY_GOAL_REFUSE = "reply:goal:refuse"
     REPLY_GOAL_NONE = "reply:goal:none"
 
-    # ---- Мои объявления (блок 9) ----
+    # ---- Мои объявления ----
     ITEMS_LIST = "items:list"
     ITEMS_STATS = "items:stats"
     ITEMS_HISTORY = "items:history"
 
-    # ---- Тарифы (блоки 11–12) ----
+    # ---- Тарифы ----
     SUB_SHOW_PRO = "sub:show_pro"
     SUB_PAY = "sub:pay"
     SUB_MY_STATUS = "sub:status"
@@ -110,19 +116,19 @@ class CB:
     # ---- Настройки ----
     SET_TIMEZONE = "settings:timezone"
     SET_REMINDERS = "settings:reminders"
-    SET_LANGUAGE = "settings:language"
     SET_PRIVACY_INFO = "settings:privacy"
     SET_DELETE_DATA = "settings:delete_data"
+    SET_DELETE_DATA_CONFIRM = "settings:delete_data:confirm"
     SET_SUPPORT = "settings:support"
     SET_HELP = "settings:help"
 
-    # ---- Напоминания (блок 10) ----
+    # ---- Напоминания ----
     REMIND_1D = "remind:1d"
     REMIND_3D = "remind:3d"
     REMIND_7D = "remind:7d"
     REMIND_OFF = "remind:off"
 
-    # ---- Поддержка (тикеты) ----
+    # ---- Поддержка ----
     SUPPORT_NEW = "support:new"
     SUPPORT_LIST = "support:list"
 
@@ -134,26 +140,20 @@ class CB:
 
 
 # ============================================================
-# ОБЩИЕ ЭЛЕМЕНТЫ
+# ХЕЛПЕРЫ
 # ============================================================
 def btn(text: str, callback_data: str) -> InlineKeyboardButton:
-    """Короткий хелпер для создания кнопки."""
     return InlineKeyboardButton(text=text, callback_data=callback_data)
 
 
 def btn_url(text: str, url: str) -> InlineKeyboardButton:
-    """Кнопка-ссылка."""
     return InlineKeyboardButton(text=text, url=url)
 
 
 # ============================================================
-# ГЛАВНОЕ МЕНЮ (Reply-клавиатура)
+# ГЛАВНОЕ МЕНЮ
 # ============================================================
 def main_menu_reply() -> ReplyKeyboardMarkup:
-    """
-    Постоянная Reply-клавиатура с главными действиями.
-    Согласно блоку 2 ТЗ — 9 кнопок в сетке 2×5.
-    """
     kb = [
         [KeyboardButton(text="📝 Создать объявление")],
         [KeyboardButton(text="🛠 Улучшить объявление")],
@@ -174,10 +174,6 @@ def main_menu_reply() -> ReplyKeyboardMarkup:
 
 
 def main_menu_inline() -> InlineKeyboardMarkup:
-    """
-    Inline-версия главного меню (для сообщений в каналах,
-    для возврата назад, для inline-режима).
-    """
     builder = InlineKeyboardBuilder()
     builder.row(btn("📝 Создать объявление", CB.MENU_CREATE))
     builder.row(btn("🛠 Улучшить объявление", CB.MENU_IMPROVE))
@@ -195,14 +191,12 @@ def main_menu_inline() -> InlineKeyboardMarkup:
 # НАВИГАЦИЯ
 # ============================================================
 def back_to_menu() -> InlineKeyboardMarkup:
-    """Кнопка «Назад в меню»."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
 
 def cancel_and_back() -> InlineKeyboardMarkup:
-    """Кнопки «Отменить» и «В меню»."""
     builder = InlineKeyboardBuilder()
     builder.row(
         btn("❌ Отменить", CB.CANCEL),
@@ -212,7 +206,6 @@ def cancel_and_back() -> InlineKeyboardMarkup:
 
 
 def confirm_keyboard(yes_text: str = "✅ Да", no_text: str = "❌ Нет") -> InlineKeyboardMarkup:
-    """Универсальная клавиатура подтверждения."""
     builder = InlineKeyboardBuilder()
     builder.row(
         btn(yes_text, CB.CONFIRM_YES),
@@ -223,10 +216,6 @@ def confirm_keyboard(yes_text: str = "✅ Да", no_text: str = "❌ Нет") ->
 
 
 def skip_or_answer() -> InlineKeyboardMarkup:
-    """
-    Кнопки «Не знаю» и «Пропустить» для вопросов интервью
-    (блок 3 ТЗ).
-    """
     builder = InlineKeyboardBuilder()
     builder.row(
         btn("🤷 Не знаю", CB.DONT_KNOW),
@@ -237,7 +226,6 @@ def skip_or_answer() -> InlineKeyboardMarkup:
 
 
 def remove_reply_keyboard() -> ReplyKeyboardRemove:
-    """Убирает Reply-клавиатуру."""
     return ReplyKeyboardRemove()
 
 
@@ -260,38 +248,58 @@ def onboarding_privacy() -> InlineKeyboardMarkup:
 # ============================================================
 # СОЗДАНИЕ ОБЪЯВЛЕНИЯ (блок 3)
 # ============================================================
-def create_listing_actions() -> InlineKeyboardMarkup:
-    """Действия во время сбора материалов."""
+def create_listing_start() -> InlineKeyboardMarkup:
+    """Стартовое меню сбора материалов."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("📸 Добавить фото", CB.CREATE_ADD_PHOTO))
+    builder.row(btn("✏️ Добавить текст о товаре", CB.CREATE_ADD_TEXT))
     builder.row(btn("✅ Материалов достаточно", CB.CREATE_DONE_MATERIALS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
-def create_listing_generate() -> InlineKeyboardMarkup:
-    """Кнопка запуска генерации."""
+def create_listing_after_photo() -> InlineKeyboardMarkup:
+    """После получения фото."""
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("✏️ Добавить текст о товаре", CB.CREATE_ADD_TEXT))
+    builder.row(btn("✅ Материалов достаточно", CB.CREATE_DONE_MATERIALS))
+    builder.row(btn("❌ Отменить", CB.CANCEL))
+    return builder.as_markup()
+
+
+def create_listing_ready() -> InlineKeyboardMarkup:
+    """Материалы собраны — можно генерировать."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("⚡ Сгенерировать объявления", CB.CREATE_GENERATE))
     builder.row(
         btn("📸 Ещё фото", CB.CREATE_ADD_PHOTO),
-        btn("❌ Отменить", CB.CANCEL),
+        btn("✏️ Ещё текст", CB.CREATE_ADD_TEXT),
     )
+    builder.row(btn("❌ Отменить", CB.CANCEL))
+    return builder.as_markup()
+
+
+def create_listing_question() -> InlineKeyboardMarkup:
+    """Ответ на уточняющий вопрос."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        btn("🤷 Не знаю", CB.DONT_KNOW),
+        btn("⏭ Пропустить", CB.SKIP),
+    )
+    builder.row(btn("⚡ Хватит вопросов, генерируй", CB.CREATE_PROCEED_AS_IS))
+    builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def listing_variants() -> InlineKeyboardMarkup:
-    """
-    Выбор одного из 3 сгенерированных вариантов.
-    Варианты: фактический, дружелюбный, альтернативный.
-    """
+    """Выбор одного из 3 сгенерированных вариантов."""
     builder = InlineKeyboardBuilder()
-    builder.row(btn("1️⃣ Фактический", "listing:pick:1"))
-    builder.row(btn("2️⃣ Дружелюбный", "listing:pick:2"))
-    builder.row(btn("3️⃣ Альтернативный", "listing:pick:3"))
+    builder.row(btn("1️⃣ Фактический", CB.LISTING_PICK_1))
+    builder.row(btn("2️⃣ Дружелюбный", CB.LISTING_PICK_2))
+    builder.row(btn("3️⃣ Альтернативный", CB.LISTING_PICK_3))
     builder.row(
-        btn("🔄 Перегенерировать", "listing:regen"),
-        btn("✏️ Редактировать", "listing:edit"),
+        btn("🔄 Перегенерировать", CB.LISTING_REGEN),
+        btn("✏️ Редактировать", CB.LISTING_EDIT),
     )
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
@@ -300,8 +308,8 @@ def listing_variants() -> InlineKeyboardMarkup:
 def listing_after_pick() -> InlineKeyboardMarkup:
     """Действия после выбора варианта."""
     builder = InlineKeyboardBuilder()
-    builder.row(btn("📋 Скопировать ещё раз", "listing:copy"))
-    builder.row(btn("💾 Сохранить в карточку", "listing:save"))
+    builder.row(btn("📋 Показать ещё раз", CB.LISTING_COPY))
+    builder.row(btn("💾 Сохранить в карточку", CB.LISTING_SAVE))
     builder.row(btn("📈 Стратегия продвижения", CB.MENU_STRATEGY))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
@@ -311,7 +319,6 @@ def listing_after_pick() -> InlineKeyboardMarkup:
 # УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ (блок 4)
 # ============================================================
 def improve_materials() -> InlineKeyboardMarkup:
-    """Что прислать для анализа."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("📝 Текст объявления", CB.IMPROVE_MATERIAL_TEXT))
     builder.row(btn("🔗 Ссылку на объявление", CB.IMPROVE_MATERIAL_LINK))
@@ -322,7 +329,6 @@ def improve_materials() -> InlineKeyboardMarkup:
 
 
 def improve_problems() -> InlineKeyboardMarkup:
-    """Диагностика: что именно не получается (блок 4 ТЗ)."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("👁 Мало просмотров", CB.IMPROVE_PROBLEM_LOW_VIEWS))
     builder.row(btn("⭐ Просмотры есть, мало избранного", CB.IMPROVE_PROBLEM_NO_FAVORITES))
@@ -338,7 +344,6 @@ def improve_problems() -> InlineKeyboardMarkup:
 # АНАЛИЗ КОНКУРЕНТОВ (блок 5)
 # ============================================================
 def competitors_collect() -> InlineKeyboardMarkup:
-    """Сбор конкурентов — от 1 до 5."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("➕ Добавить ещё", CB.COMPETITOR_ADD))
     builder.row(btn("▶️ Запустить анализ", CB.COMPETITOR_RUN))
@@ -373,7 +378,6 @@ def strategy_actions() -> InlineKeyboardMarkup:
 # ОТВЕТЫ ПОКУПАТЕЛЯМ (блок 8)
 # ============================================================
 def buyer_reply_goals() -> InlineKeyboardMarkup:
-    """Необязательная цель ответа (блок 8 ТЗ)."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("✅ Подтвердить актуальность", CB.REPLY_GOAL_CONFIRM))
     builder.row(btn("💰 Обсудить торг", CB.REPLY_GOAL_HAGGLE))
@@ -389,7 +393,6 @@ def buyer_reply_goals() -> InlineKeyboardMarkup:
 # ТАРИФЫ (блоки 11–12)
 # ============================================================
 def subscription_menu(is_pro: bool) -> InlineKeyboardMarkup:
-    """Меню тарифа — меняется в зависимости от статуса."""
     builder = InlineKeyboardBuilder()
     if is_pro:
         builder.row(btn("📊 Мой статус", CB.SUB_MY_STATUS))
@@ -401,16 +404,15 @@ def subscription_menu(is_pro: bool) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def subscription_pro_offer() -> InlineKeyboardMarkup:
-    """Оффер PRO."""
+def subscription_pro_offer(price: int = 490) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(btn("💳 Оплатить 490 ₽", CB.SUB_PAY))
+    builder.row(btn(f"💳 Оплатить {price} ₽", CB.SUB_PAY))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
 
 # ============================================================
-# НАСТРОЙКИ (блок 13 + настройки)
+# НАСТРОЙКИ
 # ============================================================
 def settings_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -425,18 +427,16 @@ def settings_menu() -> InlineKeyboardMarkup:
 
 
 def delete_data_confirm() -> InlineKeyboardMarkup:
-    """Двойное подтверждение удаления (блок 13 ТЗ)."""
     builder = InlineKeyboardBuilder()
-    builder.row(btn("🗑 Да, удалить всё", "settings:delete_data:confirm"))
+    builder.row(btn("🗑 Да, удалить всё", CB.SET_DELETE_DATA_CONFIRM))
     builder.row(btn("❌ Отмена", CB.MENU_SETTINGS))
     return builder.as_markup()
 
 
 # ============================================================
-# НАПОМИНАНИЯ (блок 10)
+# НАПОМИНАНИЯ
 # ============================================================
 def reminders_menu(current_enabled: bool, current_interval: int | None) -> InlineKeyboardMarkup:
-    """Выбор интервала напоминаний."""
     def mark(text: str, val: int) -> str:
         return f"✅ {text}" if current_interval == val and current_enabled else text
 
