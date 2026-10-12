@@ -19,6 +19,9 @@ from app.config import settings
 from app.database import db
 
 
+# ============================================================
+# BOT И DISPATCHER
+# ============================================================
 bot = Bot(
     token=settings.telegram_bot_token,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -27,6 +30,9 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 
 
+# ============================================================
+# LIFESPAN
+# ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
@@ -84,6 +90,9 @@ async def lifespan(app: FastAPI):
     logger.success("Приложение остановлено")
 
 
+# ============================================================
+# FASTAPI
+# ============================================================
 app = FastAPI(
     title="Авито-Помощник",
     version="0.1.0",
@@ -93,13 +102,17 @@ app = FastAPI(
 )
 
 
+# ============================================================
+# РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
+# ============================================================
 def _setup_dispatcher() -> None:
     """
     Регистрирует роутеры, ПОТОМ middlewares.
 
-    Порядок важен: middlewares, добавленные ДО include_router,
-    в aiogram 3.15 могут применяться некорректно.
+    ВАЖНО: fallback-хендлеры нельзя регистрировать на dp —
+    они перехватывают апдейты до роутеров.
     """
+    # --- Роутеры (сначала) ---
     from app.handlers import (
         admin,
         buyer_replies,
@@ -141,7 +154,7 @@ def _setup_dispatcher() -> None:
                 continue
             raise
 
-    # Middlewares — ПОСЛЕ роутеров
+    # --- Middlewares (после) ---
     from app.middlewares.subscription import SubscriptionMiddleware
     from app.middlewares.task_context import TaskContextMiddleware
     from app.middlewares.throttling import ThrottlingMiddleware
@@ -162,27 +175,18 @@ _setup_dispatcher()
 
 
 # ============================================================
-# Временный fallback для диагностики
+# HEALTHCHECK
 # ============================================================
-from aiogram import F as _F
-from aiogram.types import Message as _Message
-
-@dp.message(_F.text)
-async def _debug_fallback(message: _Message) -> None:
-    logger.warning(
-        f"🔔 FALLBACK сработал: text={message.text!r}, "
-        f"from_user={message.from_user.id if message.from_user else None}"
-    )
-
-
 @app.get("/health", tags=["service"])
 async def health() -> JSONResponse:
     try:
         await db.fetch_val("SELECT 1")
-        return JSONResponse({"status": "ok", "db": "ok"})
+        return JSONResponse(
+            {"status": "ok", "db": "ok", "env": settings.environment}
+        )
     except Exception as e:
         return JSONResponse(
-            {"status": "degraded", "detail": str(e)},
+            {"status": "degraded", "db": "error", "detail": str(e)},
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
@@ -192,8 +196,12 @@ async def root() -> JSONResponse:
     return JSONResponse({"service": "avito-assistant", "status": "running"})
 
 
+# ============================================================
+# WEBHOOK ОТ TELEGRAM
+# ============================================================
 @app.post(settings.webhook_path, tags=["telegram"])
 async def telegram_webhook(request: Request) -> Response:
+    """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
         logger.warning("Webhook: неверный секрет")
@@ -205,8 +213,6 @@ async def telegram_webhook(request: Request) -> Response:
         logger.info(f"📥 Апдейт id={update_id}, keys={list(data.keys())}")
 
         update = Update.model_validate(data, context={"bot": bot})
-        logger.info(f"🔍 has_message={update.message is not None}")
-
         await dp.feed_webhook_update(bot, update)
         logger.info(f"✅ Апдейт {update_id} обработан")
 
@@ -216,22 +222,39 @@ async def telegram_webhook(request: Request) -> Response:
     return Response(status_code=status.HTTP_200_OK)
 
 
+# ============================================================
+# WEBHOOK ОТ YOOKASSA
+# ============================================================
 @app.post("/yookassa/webhook", tags=["yookassa"])
 async def yookassa_webhook(request: Request) -> Response:
+    """Принимает коллбэки от ЮKassa."""
     try:
         data = await request.json()
+        logger.info(f"ЮKassa webhook: {data.get('event')}")
+
         from app.services.yookassa_service import process_webhook
         await process_webhook(data)
     except Exception as e:
-        logger.exception(f"Ошибка webhook ЮKassa: {e}")
+        logger.exception(f"Ошибка обработки webhook ЮKassa: {e}")
+
     return Response(status_code=status.HTTP_200_OK)
 
 
+# ============================================================
+# ЛОКАЛЬНЫЙ ЗАПУСК
+# ============================================================
 if __name__ == "__main__":
     if settings.bot_mode == "polling":
+        logger.info("Запуск long polling...")
         asyncio.run(dp.start_polling(bot, skip_updates=True))
     else:
         import os
         import uvicorn
         port = int(os.getenv("PORT", "3000"))
-        uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
+        logger.info(f"Запуск webhook на порту {port}")
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=port,
+            reload=False,
+        )
