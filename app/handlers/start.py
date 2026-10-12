@@ -1,11 +1,5 @@
 ﻿"""
 Хендлер /start и онбординг.
-
-Сценарий:
-1. Новый пользователь → приветствие → согласие на обработку данных →
-   выбор часового пояса → главное меню.
-2. Существующий, но не завершивший онбординг → продолжаем с того же места.
-3. Существующий с завершённым онбордингом → главное меню сразу.
 """
 
 from __future__ import annotations
@@ -31,17 +25,11 @@ from app.utils.keyboards import (
 router = Router(name="start")
 
 
-# ============================================================
-# СОСТОЯНИЯ ОНБОРДИНГА
-# ============================================================
 class OnboardingStates(StatesGroup):
     waiting_privacy = State()
     waiting_timezone = State()
 
 
-# ============================================================
-# /start
-# ============================================================
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
@@ -49,12 +37,10 @@ async def cmd_start(
     user: dict | None,
     db,
 ) -> None:
-    """Точка входа. Развилка по статусу пользователя."""
     tg_user = message.from_user
     if tg_user is None:
         return
 
-    # 1. Новый пользователь — регистрируем
     if user is None:
         user = await db.execute_returning(
             """
@@ -83,7 +69,7 @@ async def cmd_start(
             "📄 <b>Что я храню и как это использую</b>\n\n"
             "• Твой Telegram ID — чтобы помнить настройки\n"
             "• Тексты и фото объявлений — чтобы давать советы\n"
-            "• Данные отправляются в YandexGPT для генерации текста\n"
+            "• Данные отправляются в GigaChat для генерации текста\n"
             "• Я не храню платёжные реквизиты и пароли\n"
             "• В любой момент можно удалить все данные в ⚙️ Настройках\n\n"
             "Продолжая, ты соглашаешься с этим.",
@@ -91,7 +77,6 @@ async def cmd_start(
         )
         return
 
-    # 2. Пользователь есть, но онбординг не пройден
     if not user["onboarded"]:
         await state.set_state(OnboardingStates.waiting_privacy)
         await message.answer(
@@ -100,14 +85,10 @@ async def cmd_start(
         )
         return
 
-    # 3. Всё готово — сразу меню
     await state.clear()
     await _show_main_menu(message)
 
 
-# ============================================================
-# ОНБОРДИНГ — СОГЛАСИЕ
-# ============================================================
 @router.callback_query(F.data == CB.ONBOARD_ACCEPT_PRIVACY)
 async def on_privacy_accepted(
     callback: CallbackQuery,
@@ -143,12 +124,8 @@ async def on_privacy_accepted(
     await callback.answer()
 
 
-# ============================================================
-# ИНФОРМАЦИЯ О ПРИВАТНОСТИ (кнопка «Что хранится?»)
-# ============================================================
 @router.callback_query(F.data == CB.SET_PRIVACY_INFO)
 async def show_privacy_info(callback: CallbackQuery) -> None:
-    """Показывает, какие данные хранятся и куда передаются."""
     await callback.message.answer(
         "📄 <b>Что я храню и куда передаю</b>\n\n"
         "<b>Храню:</b>\n"
@@ -158,7 +135,7 @@ async def show_privacy_info(callback: CallbackQuery) -> None:
         "• Статистику и историю работы с товарами\n"
         "• Идентификаторы платежей (без реквизитов карты)\n\n"
         "<b>Передаю внешним сервисам:</b>\n"
-        "• <b>YandexGPT</b> — тексты и фото объявлений для генерации\n"
+        "• <b>GigaChat</b> — тексты и фото объявлений для генерации\n"
         "• <b>ЮKassa</b> — сумму и ID платежа для оплаты\n"
         "• <b>Telegram</b> — сами сообщения (это мессенджер)\n\n"
         "<b>НЕ храню:</b>\n"
@@ -170,9 +147,6 @@ async def show_privacy_info(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# ============================================================
-# ОНБОРДИНГ — ЧАСОВОЙ ПОЯС
-# ============================================================
 CITY_TO_TZ = {
     "москва": "Europe/Moscow",
     "питер": "Europe/Moscow",
@@ -226,12 +200,9 @@ async def on_timezone_entered(
 
 
 def _resolve_timezone(raw: str) -> str | None:
-    """Пытается превратить ввод пользователя в валидную IANA-зону."""
     key = raw.lower().strip()
-
     if key in CITY_TO_TZ:
         return CITY_TO_TZ[key]
-
     try:
         ZoneInfo(raw)
         return raw
@@ -239,9 +210,6 @@ def _resolve_timezone(raw: str) -> str | None:
         return None
 
 
-# ============================================================
-# ПОКАЗ ГЛАВНОГО МЕНЮ
-# ============================================================
 async def _show_main_menu(message: Message) -> None:
     await message.answer(
         "🏠 <b>Главное меню</b>\n\n"
@@ -251,9 +219,6 @@ async def _show_main_menu(message: Message) -> None:
     )
 
 
-# ============================================================
-# ВОЗВРАТ В МЕНЮ ПО КНОПКЕ
-# ============================================================
 @router.callback_query(F.data == CB.MENU_MAIN)
 async def back_to_main_menu(
     callback: CallbackQuery,
@@ -267,9 +232,6 @@ async def back_to_main_menu(
     await callback.answer()
 
 
-# ============================================================
-# /help
-# ============================================================
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
@@ -289,9 +251,6 @@ async def cmd_help(message: Message) -> None:
     )
 
 
-# ============================================================
-# ОТМЕНА ТЕКУЩЕЙ ЗАДАЧИ
-# ============================================================
 @router.callback_query(F.data == CB.CANCEL)
 async def cancel_current(
     callback: CallbackQuery,
