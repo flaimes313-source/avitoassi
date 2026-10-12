@@ -260,10 +260,16 @@ if __name__ == "__main__":
         logger.info("Запуск long polling...")
         asyncio.run(dp.start_polling(bot, skip_updates=True))
     else:
+        import os
         import uvicorn
+
+        # BotHost передаёт порт в переменную PORT (по умолчанию 3000)
+        port = int(os.getenv("PORT", "3000"))
+
+        logger.info(f"Запуск webhook на порту {port}")
         uvicorn.run(
             "app.main:app",
             host="0.0.0.0",
-            port=8000,
+            port=port,
             reload=False,
         )
