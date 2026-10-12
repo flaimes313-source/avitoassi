@@ -25,7 +25,6 @@ from app.utils.keyboards import (
     back_to_menu,
     main_menu_reply,
     onboarding_privacy,
-    onboarding_start,
     remove_reply_keyboard,
 )
 
@@ -36,8 +35,8 @@ router = Router(name="start")
 # СОСТОЯНИЯ ОНБОРДИНГА
 # ============================================================
 class OnboardingStates(StatesGroup):
-    waiting_privacy = State()   # ждём согласия на обработку данных
-    waiting_timezone = State()  # ждём ввода часового пояса
+    waiting_privacy = State()
+    waiting_timezone = State()
 
 
 # ============================================================
@@ -145,9 +144,35 @@ async def on_privacy_accepted(
 
 
 # ============================================================
+# ИНФОРМАЦИЯ О ПРИВАТНОСТИ (кнопка «Что хранится?»)
+# ============================================================
+@router.callback_query(F.data == CB.SET_PRIVACY_INFO)
+async def show_privacy_info(callback: CallbackQuery) -> None:
+    """Показывает, какие данные хранятся и куда передаются."""
+    await callback.message.answer(
+        "📄 <b>Что я храню и куда передаю</b>\n\n"
+        "<b>Храню:</b>\n"
+        "• Твой Telegram ID, имя, username\n"
+        "• Часовой пояс\n"
+        "• Тексты и фото объявлений, которые ты присылаешь\n"
+        "• Статистику и историю работы с товарами\n"
+        "• Идентификаторы платежей (без реквизитов карты)\n\n"
+        "<b>Передаю внешним сервисам:</b>\n"
+        "• <b>YandexGPT</b> — тексты и фото объявлений для генерации\n"
+        "• <b>ЮKassa</b> — сумму и ID платежа для оплаты\n"
+        "• <b>Telegram</b> — сами сообщения (это мессенджер)\n\n"
+        "<b>НЕ храню:</b>\n"
+        "• Пароли, номера карт, CVV\n"
+        "• Оригиналы фото дольше 24 часов\n\n"
+        "<b>Удаление данных:</b>\n"
+        "В ⚙️ Настройках → «🗑 Удалить мои данные» — удалю всё безвозвратно."
+    )
+    await callback.answer()
+
+
+# ============================================================
 # ОНБОРДИНГ — ЧАСОВОЙ ПОЯС
 # ============================================================
-# Простая карта «город → зона». Расширим позже.
 CITY_TO_TZ = {
     "москва": "Europe/Moscow",
     "питер": "Europe/Moscow",
@@ -204,11 +229,9 @@ def _resolve_timezone(raw: str) -> str | None:
     """Пытается превратить ввод пользователя в валидную IANA-зону."""
     key = raw.lower().strip()
 
-    # Прямое совпадение по городу
     if key in CITY_TO_TZ:
         return CITY_TO_TZ[key]
 
-    # Пробуем как IANA-имя
     try:
         ZoneInfo(raw)
         return raw

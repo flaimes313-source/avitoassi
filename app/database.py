@@ -5,7 +5,7 @@
 - Глобальный пул соединений `db`
 - Хелперы `fetch_one`, `fetch_all`, `execute`, `execute_returning`, `fetch_val`
 - Ленивую инициализацию пула (важно для uvicorn с несколькими worker'ами)
-- Автоматическое применение схемы при первом старте
+- Безопасное применение схемы (не падает при повторном запуске)
 """
 
 from __future__ import annotations
@@ -31,11 +31,9 @@ class Database:
         await db.close()
 
     Ленивая инициализация:
-        Если пул не открыт — любой из методов (fetch_one, execute и т.д.)
-        автоматически вызовет connect() перед выполнением запроса.
-        Это спасает при запуске uvicorn с несколькими worker-процессами,
-        когда lifespan отрабатывает не в том процессе, что обрабатывает
-        апдейты.
+        Если пул не открыт — любой из методов автоматически
+        вызовет connect() перед выполнением запроса. Это спасает
+        при запуске uvicorn с несколькими worker-процессами.
     """
 
     def __init__(self) -> None:
@@ -74,7 +72,7 @@ class Database:
                 row = await cur.fetchone()
                 logger.info(f"PostgreSQL подключён: {row['version'].split(',')[0]}")
 
-        # Применяем схему (idempotent)
+        # Применяем схему
         await self._apply_schema()
 
         logger.success("Пул соединений готов")
@@ -90,10 +88,7 @@ class Database:
     # ЛЕНИВАЯ ИНИЦИАЛИЗАЦИЯ
     # --------------------------------------------------------
     async def _get_pool(self) -> AsyncConnectionPool:
-        """
-        Возвращает пул. Если он ещё не открыт — открывает.
-        Это ключевой метод для работы с uvicorn worker'ами.
-        """
+        """Возвращает пул. Если он ещё не открыт — открывает."""
         if self._pool is None:
             await self.connect()
         assert self._pool is not None
@@ -105,8 +100,13 @@ class Database:
     async def _apply_schema(self) -> None:
         """
         Применяет migrations/init.sql.
-        Все запросы идемпотентны (IF NOT EXISTS), поэтому можно
-        вызывать при каждом старте.
+
+        Все запросы идемпотентны (IF NOT EXISTS / DROP IF EXISTS),
+        поэтому можно вызывать при каждом старте.
+
+        Дополнительно защищаемся от «already exists»: если
+        Postgres ругается на дубликат — просто логируем и продолжаем,
+        приложение не падает.
         """
         schema_path = Path(__file__).parent.parent / "migrations" / "init.sql"
 
@@ -120,8 +120,17 @@ class Database:
         assert self._pool is not None
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql)
-        logger.success("Схема БД применена")
+                try:
+                    await cur.execute(sql)
+                    logger.success("Схема БД применена")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        logger.warning(
+                            f"Часть схемы уже применена, пропускаю: {e}"
+                        )
+                    else:
+                        logger.error(f"Ошибка применения схемы: {e}")
+                        raise
 
     # --------------------------------------------------------
     # ХЕЛПЕРЫ ЗАПРОСОВ
@@ -131,15 +140,7 @@ class Database:
         query: str,
         params: tuple | dict | None = None,
     ) -> None:
-        """
-        Выполняет запрос без возврата строк (INSERT, UPDATE, DELETE).
-
-        Пример:
-            await db.execute(
-                "INSERT INTO users (telegram_id) VALUES (%s)",
-                (12345,),
-            )
-        """
+        """Выполняет запрос без возврата строк (INSERT, UPDATE, DELETE)."""
         pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -150,15 +151,7 @@ class Database:
         query: str,
         params: tuple | dict | None = None,
     ) -> dict[str, Any] | None:
-        """
-        Выполняет запрос с RETURNING и возвращает одну строку.
-
-        Пример:
-            row = await db.execute_returning(
-                "INSERT INTO users (telegram_id) VALUES (%s) RETURNING *",
-                (12345,),
-            )
-        """
+        """Выполняет запрос с RETURNING и возвращает одну строку."""
         pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -170,15 +163,7 @@ class Database:
         query: str,
         params: tuple | dict | None = None,
     ) -> dict[str, Any] | None:
-        """
-        Возвращает одну строку или None.
-
-        Пример:
-            user = await db.fetch_one(
-                "SELECT * FROM users WHERE telegram_id = %s",
-                (12345,),
-            )
-        """
+        """Возвращает одну строку или None."""
         pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -190,15 +175,7 @@ class Database:
         query: str,
         params: tuple | dict | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Возвращает список строк.
-
-        Пример:
-            users = await db.fetch_all(
-                "SELECT * FROM users WHERE tariff = %s",
-                ("pro",),
-            )
-        """
+        """Возвращает список строк."""
         pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -210,14 +187,7 @@ class Database:
         query: str,
         params: tuple | dict | None = None,
     ) -> Any:
-        """
-        Возвращает одно значение из первой строки.
-
-        Пример:
-            count = await db.fetch_val(
-                "SELECT COUNT(*) FROM users WHERE tariff = 'pro'"
-            )
-        """
+        """Возвращает одно значение из первой строки."""
         pool = await self._get_pool()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
