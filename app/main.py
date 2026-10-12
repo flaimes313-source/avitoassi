@@ -44,7 +44,6 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 
-# FSM-хранилище: в памяти процесса.
 dp = Dispatcher(storage=MemoryStorage())
 
 
@@ -138,15 +137,27 @@ app = FastAPI(
 # ============================================================
 # РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
 # ============================================================
+_dp_configured = False
+
+
 def _setup_dispatcher() -> None:
-    """Регистрирует middlewares, роутеры и глобальные обработчики."""
+    """
+    Регистрирует middlewares и роутеры.
+
+    Идемпотентна: при повторном вызове (uvicorn --reload
+    перезапускает модуль в дочернем процессе) не падает.
+    """
+    global _dp_configured
+    if _dp_configured:
+        logger.debug("Dispatcher уже настроен, повторная настройка пропущена")
+        return
+
     # --- Middlewares ---
     from app.middlewares.subscription import SubscriptionMiddleware
     from app.middlewares.task_context import TaskContextMiddleware
     from app.middlewares.throttling import ThrottlingMiddleware
     from app.middlewares.db import DbSessionMiddleware
 
-    # Порядок: throttling → db → subscription → task_context
     dp.update.outer_middleware(ThrottlingMiddleware())
     dp.update.outer_middleware(DbSessionMiddleware())
     dp.update.outer_middleware(SubscriptionMiddleware())
@@ -183,6 +194,7 @@ def _setup_dispatcher() -> None:
     dp.include_router(reminders.router)
     dp.include_router(support.router)
 
+    _dp_configured = True
     logger.info("Все роутеры и middlewares зарегистрированы")
 
 
