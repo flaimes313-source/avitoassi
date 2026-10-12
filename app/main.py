@@ -6,11 +6,11 @@ warnings.filterwarnings("ignore", message=".*protected namespace.*")
 import asyncio
 from contextlib import asynccontextmanager
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Update
+from aiogram.types import Message, Update
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -19,15 +19,22 @@ from app.config import settings
 from app.database import db
 
 
-# ============================================================
-# BOT И DISPATCHER
-# ============================================================
 bot = Bot(
     token=settings.telegram_bot_token,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 
 dp = Dispatcher(storage=MemoryStorage())
+
+
+# ============================================================
+# ПРОСТЕЙШИЙ ХЕНДЛЕР — ПРЯМО НА DP
+# ============================================================
+@dp.message(F.text == "/start")
+async def debug_start_handler(message: Message) -> None:
+    logger.info(f"🎯 debug_start_handler СРАБОТАЛ: from_user={message.from_user.id}")
+    await message.answer("DEBUG: обработчик на dp сработал!")
+    logger.info("DEBUG-ответ отправлен")
 
 
 # ============================================================
@@ -43,15 +50,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"Не удалось подключиться к БД на старте: {e}")
 
     try:
-        from app.services.scheduler import scheduler_service
-        await scheduler_service.start()
-    except Exception as e:
-        logger.error(f"Не удалось запустить scheduler: {e}")
-
-    try:
         if settings.bot_mode == "webhook":
-            if not settings.webhook_base_url:
-                raise RuntimeError("BOT_MODE=webhook, но WEBHOOK_BASE_URL не задан")
             await bot.set_webhook(
                 url=settings.webhook_url,
                 secret_token=settings.webhook_secret,
@@ -61,7 +60,6 @@ async def lifespan(app: FastAPI):
             logger.info(f"Webhook зарегистрирован: {settings.webhook_url}")
         else:
             await bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook удалён (режим polling)")
     except Exception as e:
         logger.error(f"Ошибка при работе с webhook: {e}")
 
@@ -69,139 +67,34 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    logger.info("Остановка приложения...")
-
-    try:
-        from app.services.scheduler import scheduler_service
-        await scheduler_service.stop()
-    except Exception as e:
-        logger.warning(f"Ошибка остановки scheduler: {e}")
-
     try:
         await bot.session.close()
-    except Exception as e:
-        logger.warning(f"Ошибка закрытия сессии бота: {e}")
-
+    except Exception:
+        pass
     try:
         await db.close()
-    except Exception as e:
-        logger.warning(f"Ошибка закрытия БД: {e}")
+    except Exception:
+        pass
 
     logger.success("Приложение остановлено")
 
 
-# ============================================================
-# FASTAPI
-# ============================================================
-app = FastAPI(
-    title="Авито-Помощник",
-    version="0.1.0",
-    lifespan=lifespan,
-    docs_url="/docs" if settings.is_dev else None,
-    redoc_url=None,
-)
-
-
-# ============================================================
-# РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
-# ============================================================
-def _setup_dispatcher() -> None:
-    """
-    Регистрирует роутеры, ПОТОМ middlewares.
-
-    ВАЖНО: fallback-хендлеры нельзя регистрировать на dp —
-    они перехватывают апдейты до роутеров.
-    """
-    # --- Роутеры (сначала) ---
-    from app.handlers import (
-        admin,
-        buyer_replies,
-        competitors,
-        create_listing,
-        improve_listing,
-        items_history,
-        photos,
-        reminders,
-        settings as settings_handler,
-        start,
-        strategy,
-        subscription,
-        support,
-    )
-
-    routers = [
-        admin.router,
-        start.router,
-        settings_handler.router,
-        subscription.router,
-        create_listing.router,
-        improve_listing.router,
-        competitors.router,
-        photos.router,
-        strategy.router,
-        buyer_replies.router,
-        items_history.router,
-        reminders.router,
-        support.router,
-    ]
-
-    for router in routers:
-        try:
-            dp.include_router(router)
-        except RuntimeError as e:
-            if "already attached" in str(e):
-                logger.debug(f"Роутер уже привязан, пропускаю: {e}")
-                continue
-            raise
-
-    # --- Middlewares (после) ---
-    from app.middlewares.subscription import SubscriptionMiddleware
-    from app.middlewares.task_context import TaskContextMiddleware
-    from app.middlewares.throttling import ThrottlingMiddleware
-    from app.middlewares.db import DbSessionMiddleware
-
-    try:
-        dp.update.outer_middleware(ThrottlingMiddleware())
-        dp.update.outer_middleware(DbSessionMiddleware())
-        dp.update.outer_middleware(SubscriptionMiddleware())
-        dp.update.outer_middleware(TaskContextMiddleware())
-    except Exception as e:
-        logger.debug(f"Middlewares уже добавлены: {e}")
-
-    logger.info("Все роутеры и middlewares зарегистрированы")
-
-
-_setup_dispatcher()
+app = FastAPI(lifespan=lifespan)
 
 
 # ============================================================
 # HEALTHCHECK
 # ============================================================
-@app.get("/health", tags=["service"])
-async def health() -> JSONResponse:
-    try:
-        await db.fetch_val("SELECT 1")
-        return JSONResponse(
-            {"status": "ok", "db": "ok", "env": settings.environment}
-        )
-    except Exception as e:
-        return JSONResponse(
-            {"status": "degraded", "db": "error", "detail": str(e)},
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
-
-@app.get("/", tags=["service"])
-async def root() -> JSONResponse:
-    return JSONResponse({"service": "avito-assistant", "status": "running"})
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 # ============================================================
-# WEBHOOK ОТ TELEGRAM
+# WEBHOOK
 # ============================================================
-@app.post(settings.webhook_path, tags=["telegram"])
+@app.post(settings.webhook_path)
 async def telegram_webhook(request: Request) -> Response:
-    """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
         logger.warning("Webhook: неверный секрет")
@@ -209,52 +102,24 @@ async def telegram_webhook(request: Request) -> Response:
 
     try:
         data = await request.json()
-        update_id = data.get("update_id")
-        logger.info(f"📥 Апдейт id={update_id}, keys={list(data.keys())}")
+        logger.info(f"📥 Апдейт keys={list(data.keys())}")
 
+        # ПРЯМАЯ передача в dp через feed_webhook_update
         update = Update.model_validate(data, context={"bot": bot})
         await dp.feed_webhook_update(bot, update)
-        logger.info(f"✅ Апдейт {update_id} обработан")
+        logger.info("✅ Апдейт обработан")
 
     except Exception as e:
-        logger.exception(f"❌ Ошибка обработки апдейта: {e}")
+        logger.exception(f"❌ Ошибка: {e}")
 
     return Response(status_code=status.HTTP_200_OK)
 
 
-# ============================================================
-# WEBHOOK ОТ YOOKASSA
-# ============================================================
-@app.post("/yookassa/webhook", tags=["yookassa"])
-async def yookassa_webhook(request: Request) -> Response:
-    """Принимает коллбэки от ЮKassa."""
-    try:
-        data = await request.json()
-        logger.info(f"ЮKassa webhook: {data.get('event')}")
-
-        from app.services.yookassa_service import process_webhook
-        await process_webhook(data)
-    except Exception as e:
-        logger.exception(f"Ошибка обработки webhook ЮKassa: {e}")
-
-    return Response(status_code=status.HTTP_200_OK)
-
-
-# ============================================================
-# ЛОКАЛЬНЫЙ ЗАПУСК
-# ============================================================
 if __name__ == "__main__":
     if settings.bot_mode == "polling":
-        logger.info("Запуск long polling...")
         asyncio.run(dp.start_polling(bot, skip_updates=True))
     else:
         import os
         import uvicorn
         port = int(os.getenv("PORT", "3000"))
-        logger.info(f"Запуск webhook на порту {port}")
-        uvicorn.run(
-            "app.main:app",
-            host="0.0.0.0",
-            port=port,
-            reload=False,
-        )
+        uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
