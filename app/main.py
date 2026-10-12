@@ -221,18 +221,24 @@ async def yookassa_webhook(request: Request) -> Response:
 
 
 # ============================================================
-# ЛОКАЛЬНЫЙ ЗАПУСК — БЕЗ uvicorn.run()
+# ЗАПУСК НА BOTHOST И ЛОКАЛЬНО
 # ============================================================
 if __name__ == "__main__":
-    # ВНИМАНИЕ: этот блок не должен запускать uvicorn.
-    # BotHost сам запускает `uvicorn app.main:app`.
-    # Если здесь вызвать uvicorn.run(), app.main импортируется дважды,
-    # и роутеры привязываются к «мёртвому» первому Dispatcher.
+    # BotHost запускает `python -m app.main`.
+    # Здесь мы сами поднимаем uvicorn.
+    # Передаём ОБЪЕКТ `app`, а не строку "app.main:app" —
+    # это исключает повторный импорт модуля.
     if settings.bot_mode == "polling":
-        logger.info("Запуск long polling (локально)...")
+        logger.info("Запуск long polling...")
         asyncio.run(dp.start_polling(bot, skip_updates=True))
     else:
-        logger.warning(
-            "Запуск через `python -m app.main` не поддерживается на BotHost. "
-            "Используйте `uvicorn app.main:app`."
+        import os
+        import uvicorn
+        port = int(os.getenv("PORT", "3000"))
+        logger.info(f"Запуск uvicorn на порту {port}")
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=port,
+            log_level="info",
         )
