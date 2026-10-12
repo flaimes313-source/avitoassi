@@ -14,6 +14,10 @@
     uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
 """
 
+# Отключаем шумные предупреждения от Pydantic внутри GigaChat SDK
+import warnings
+warnings.filterwarnings("ignore", message=".*protected namespace.*")
+
 from __future__ import annotations
 
 import asyncio
@@ -57,22 +61,18 @@ async def lifespan(app: FastAPI):
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
 
     # --- Старт ---
-    # Пробуем подключиться к БД. Если упало — не падаем, ленивая
-    # инициализация подстрахует.
     try:
         await db.connect()
     except Exception as e:
         logger.error(f"Не удалось подключиться к БД на старте: {e}")
         logger.warning("Пул откроется лениво при первом запросе")
 
-    # Запуск scheduler
     try:
         from app.services.scheduler import scheduler_service
         await scheduler_service.start()
     except Exception as e:
         logger.error(f"Не удалось запустить scheduler: {e}")
 
-    # Работа с webhook Telegram
     try:
         if settings.bot_mode == "webhook":
             if not settings.webhook_base_url:
