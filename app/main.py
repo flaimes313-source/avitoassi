@@ -220,15 +220,43 @@ async def telegram_webhook(request: Request) -> Response:
     """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
-        logger.warning("Webhook: неверный секрет")
+        logger.warning(
+            f"Webhook: неверный секрет. "
+            f"Получено: {secret!r}, ожидается: {settings.webhook_secret!r}"
+        )
         return Response(status_code=status.HTTP_403_FORBIDDEN)
 
     try:
         data = await request.json()
+
+        # Подробное логирование апдейта
+        update_id = data.get("update_id")
+        update_type = next(
+            (k for k in data.keys() if k != "update_id"),
+            "unknown",
+        )
+        logger.info(f"📥 Апдейт id={update_id}, тип={update_type}")
+
+        if update_type == "message":
+            msg = data["message"]
+            logger.info(
+                f"   message.text={msg.get('text')!r}, "
+                f"from_user={msg.get('from', {}).get('id')}, "
+                f"chat_id={msg.get('chat', {}).get('id')}"
+            )
+        elif update_type == "callback_query":
+            cq = data["callback_query"]
+            logger.info(
+                f"   callback.data={cq.get('data')!r}, "
+                f"from_user={cq.get('from', {}).get('id')}"
+            )
+
         update = Update.model_validate(data, context={"bot": bot})
         await dp.feed_update(bot, update)
+        logger.info(f"✅ Апдейт {update_id} обработан")
+
     except Exception as e:
-        logger.exception(f"Ошибка обработки апдейта: {e}")
+        logger.exception(f"❌ Ошибка обработки апдейта: {e}")
         return Response(status_code=status.HTTP_200_OK)
 
     return Response(status_code=status.HTTP_200_OK)

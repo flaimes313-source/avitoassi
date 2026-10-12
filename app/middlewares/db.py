@@ -37,6 +37,12 @@ class DbSessionMiddleware(BaseMiddleware):
 
         # 2. Пытаемся найти пользователя в БД
         tg_user: TgUser | None = data.get("event_from_user")
+
+        logger.info(
+            f"DbSessionMiddleware: event={type(event).__name__}, "
+            f"tg_user={tg_user.id if tg_user else None}"
+        )
+
         if tg_user is not None:
             try:
                 user_row = await db.fetch_one(
@@ -44,10 +50,15 @@ class DbSessionMiddleware(BaseMiddleware):
                     (tg_user.id,),
                 )
                 data["user"] = user_row
+                logger.info(
+                    f"   user найден: {user_row is not None}"
+                    + (f", tariff={user_row['tariff']}" if user_row else "")
+                )
             except Exception as e:
                 logger.exception(f"Ошибка загрузки пользователя {tg_user.id}: {e}")
                 data["user"] = None
         else:
             data["user"] = None
+            logger.info("   event_from_user отсутствует, user=None")
 
         return await handler(event, data)
