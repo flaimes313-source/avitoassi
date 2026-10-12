@@ -14,11 +14,12 @@
     uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
 """
 
+# ВАЖНО: from __future__ должен идти самым первым исполняемым оператором
+from __future__ import annotations
+
 # Отключаем шумные предупреждения от Pydantic внутри GigaChat SDK
 import warnings
 warnings.filterwarnings("ignore", message=".*protected namespace.*")
-
-from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
