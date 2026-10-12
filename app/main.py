@@ -229,7 +229,6 @@ async def telegram_webhook(request: Request) -> Response:
     try:
         data = await request.json()
 
-        # Подробное логирование апдейта
         update_id = data.get("update_id")
         update_type = next(
             (k for k in data.keys() if k != "update_id"),
@@ -251,7 +250,25 @@ async def telegram_webhook(request: Request) -> Response:
                 f"from_user={cq.get('from', {}).get('id')}"
             )
 
+        # --- ВАЛИДАЦИЯ АПДЕЙТА ---
         update = Update.model_validate(data, context={"bot": bot})
+
+        # Диагностика: что aiogram распарсил?
+        logger.info(
+            f"🔍 После model_validate: "
+            f"update_id={update.update_id}, "
+            f"has_message={update.message is not None}, "
+            f"has_callback={update.callback_query is not None}, "
+            f"has_edited={update.edited_message is not None}"
+        )
+
+        if update.message is not None:
+            logger.info(
+                f"   Update.message.text={update.message.text!r}, "
+                f"from_user={update.message.from_user.id if update.message.from_user else None}"
+            )
+
+        # --- ОБРАБОТКА ---
         await dp.feed_update(bot, update)
         logger.info(f"✅ Апдейт {update_id} обработан")
 
