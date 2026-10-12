@@ -20,9 +20,6 @@ from app.config import settings
 class GigaChatService:
     """
     Асинхронная обёртка над синхронным SDK GigaChat.
-
-    SDK GigaChat синхронный, поэтому оборачиваем вызовы
-    в asyncio.to_thread, чтобы не блокировать event loop бота.
     """
 
     def __init__(self) -> None:
@@ -31,11 +28,19 @@ class GigaChatService:
     def _get_client(self) -> GigaChat:
         """Ленивая инициализация клиента."""
         if self._client is None:
-            # Если указан ca_bundle_file — используем его,
-            # иначе отключаем проверку SSL (для dev)
+            # Защита от пустого scope: если переменная пустая
+            # или None — используем GIGACHAT_API_PERS
+            scope = (settings.gigachat_scope or "").strip() or "GIGACHAT_API_PERS"
+
+            logger.info(
+                f"🔧 GigaChat init: scope={scope!r}, "
+                f"model={settings.gigachat_model!r}, "
+                f"credentials_length={len(settings.gigachat_credentials)}"
+            )
+
             client_kwargs: dict[str, Any] = {
                 "credentials": settings.gigachat_credentials,
-                "scope": settings.gigachat_scope,
+                "scope": scope,
                 "model": settings.gigachat_model,
                 "timeout": 60.0,
                 "max_retries": 2,
@@ -51,7 +56,7 @@ class GigaChatService:
             logger.info(
                 f"GigaChat клиент инициализирован: "
                 f"model={settings.gigachat_model}, "
-                f"scope={settings.gigachat_scope}"
+                f"scope={scope}"
             )
 
         return self._client
@@ -63,9 +68,6 @@ class GigaChatService:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """
-        Синхронный вызов GigaChat. Запускается в отдельном потоке.
-        """
         client = self._get_client()
 
         messages = [
@@ -81,10 +83,7 @@ class GigaChatService:
         )
 
         response = client.chat(chat)
-
-        # Извлекаем текст ответа
-        content = response.choices[0].message.content
-        return content
+        return response.choices[0].message.content
 
     async def generate(
         self,
@@ -93,21 +92,6 @@ class GigaChatService:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """
-        Основной метод — генерирует текст через GigaChat.
-
-        Args:
-            system_prompt: Системная инструкция (роль ИИ)
-            user_prompt: Пользовательский запрос
-            temperature: Температура (0.0–1.0)
-            max_tokens: Максимум токенов
-
-        Returns:
-            Сгенерированный текст.
-
-        Raises:
-            RuntimeError: если GigaChat недоступен и fallback тоже не сработал.
-        """
         try:
             result = await asyncio.to_thread(
                 self._sync_chat,
@@ -122,7 +106,6 @@ class GigaChatService:
         except Exception as e:
             logger.error(f"Ошибка GigaChat: {e}")
 
-            # Fallback на YandexGPT
             if settings.has_yandex_fallback:
                 logger.warning("Пробую fallback на YandexGPT...")
                 try:
@@ -145,10 +128,6 @@ class GigaChatService:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> dict:
-        """
-        Генерирует ответ и пытается распарсить его как JSON.
-        Удобно для структурированных задач (анализ конкурентов и т.п.).
-        """
         import json
 
         result = await self.generate(
@@ -158,7 +137,6 @@ class GigaChatService:
             max_tokens=max_tokens,
         )
 
-        # Чистим возможные markdown-обёртки
         cleaned = result.strip()
         if cleaned.startswith("```json"):
             cleaned = cleaned[7:]
@@ -176,7 +154,4 @@ class GigaChatService:
             raise RuntimeError(f"GigaChat вернул невалидный JSON: {e}")
 
 
-# ============================================================
-# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР
-# ============================================================
 gigachat_service = GigaChatService()
