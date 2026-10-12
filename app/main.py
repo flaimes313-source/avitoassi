@@ -35,14 +35,8 @@ dp = Dispatcher(storage=MemoryStorage())
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Управляет жизненным циклом приложения.
-    Все ошибки на старте логируем, но не роняем контейнер —
-    пул досоздастся лениво при первом запросе.
-    """
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
 
-    # --- Старт ---
     try:
         await db.connect()
     except Exception as e:
@@ -75,7 +69,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # --- Остановка ---
     logger.info("Остановка приложения...")
 
     try:
@@ -122,11 +115,8 @@ app = FastAPI(
 def _setup_dispatcher() -> None:
     """
     Регистрирует middlewares и роутеры.
-
-    Идемпотентна: если роутер уже привязан к диспетчеру
-    (например, при повторном импорте модуля), просто пропускаем.
+    Идемпотентна: повторный вызов не падает.
     """
-    # --- Middlewares ---
     from app.middlewares.subscription import SubscriptionMiddleware
     from app.middlewares.task_context import TaskContextMiddleware
     from app.middlewares.throttling import ThrottlingMiddleware
@@ -140,7 +130,6 @@ def _setup_dispatcher() -> None:
     except Exception as e:
         logger.debug(f"Middlewares уже добавлены: {e}")
 
-    # --- Роутеры ---
     from app.handlers import (
         admin,
         buyer_replies,
@@ -193,7 +182,6 @@ _setup_dispatcher()
 # ============================================================
 @app.get("/health", tags=["service"])
 async def health() -> JSONResponse:
-    """Healthcheck для BotHost."""
     try:
         await db.fetch_val("SELECT 1")
         return JSONResponse(
@@ -220,10 +208,7 @@ async def telegram_webhook(request: Request) -> Response:
     """Принимает апдейты от Telegram."""
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != settings.webhook_secret:
-        logger.warning(
-            f"Webhook: неверный секрет. "
-            f"Получено: {secret!r}, ожидается: {settings.webhook_secret!r}"
-        )
+        logger.warning("Webhook: неверный секрет")
         return Response(status_code=status.HTTP_403_FORBIDDEN)
 
     try:
@@ -240,36 +225,14 @@ async def telegram_webhook(request: Request) -> Response:
             msg = data["message"]
             logger.info(
                 f"   message.text={msg.get('text')!r}, "
-                f"from_user={msg.get('from', {}).get('id')}, "
-                f"chat_id={msg.get('chat', {}).get('id')}"
-            )
-        elif update_type == "callback_query":
-            cq = data["callback_query"]
-            logger.info(
-                f"   callback.data={cq.get('data')!r}, "
-                f"from_user={cq.get('from', {}).get('id')}"
+                f"from_user={msg.get('from', {}).get('id')}"
             )
 
-        # --- ВАЛИДАЦИЯ АПДЕЙТА ---
         update = Update.model_validate(data, context={"bot": bot})
+        logger.info(f"🔍 Update parsed, has_message={update.message is not None}")
 
-        # Диагностика: что aiogram распарсил?
-        logger.info(
-            f"🔍 После model_validate: "
-            f"update_id={update.update_id}, "
-            f"has_message={update.message is not None}, "
-            f"has_callback={update.callback_query is not None}, "
-            f"has_edited={update.edited_message is not None}"
-        )
-
-        if update.message is not None:
-            logger.info(
-                f"   Update.message.text={update.message.text!r}, "
-                f"from_user={update.message.from_user.id if update.message.from_user else None}"
-            )
-
-        # --- ОБРАБОТКА ---
-        await dp.feed_update(bot, update)
+        # КЛЮЧЕВОЕ: feed_webhook_update вместо feed_update
+        await dp.feed_webhook_update(bot, update)
         logger.info(f"✅ Апдейт {update_id} обработан")
 
     except Exception as e:
@@ -284,7 +247,6 @@ async def telegram_webhook(request: Request) -> Response:
 # ============================================================
 @app.post("/yookassa/webhook", tags=["yookassa"])
 async def yookassa_webhook(request: Request) -> Response:
-    """Принимает коллбэки от ЮKassa."""
     try:
         data = await request.json()
         logger.info(f"ЮKassa webhook: {data.get('event')}")
@@ -308,9 +270,7 @@ if __name__ == "__main__":
         import os
         import uvicorn
 
-        # BotHost передаёт порт в переменную PORT (по умолчанию 3000)
         port = int(os.getenv("PORT", "3000"))
-
         logger.info(f"Запуск webhook на порту {port}")
         uvicorn.run(
             "app.main:app",
