@@ -28,20 +28,61 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 # ============================================================
-# ПОДКЛЮЧАЕМ start.router
+# ПОДКЛЮЧАЕМ РОУТЕРЫ
 # ============================================================
-from app.handlers import start as start_handlers
-dp.include_router(start_handlers.router)
-logger.info(f"start.router подключён: {start_handlers.router}")
+def _setup_dispatcher() -> None:
+    """
+    Подключает роутеры. Идемпотентна — при повторном вызове
+    (uvicorn перезапускает модуль) просто выходит.
+    """
+    from app.handlers import (
+        admin,
+        buyer_replies,
+        competitors,
+        create_listing,
+        improve_listing,
+        items_history,
+        photos,
+        reminders,
+        settings as settings_handler,
+        start,
+        strategy,
+        subscription,
+        support,
+    )
+
+    routers = [
+        admin.router,
+        start.router,
+        settings_handler.router,
+        subscription.router,
+        create_listing.router,
+        improve_listing.router,
+        competitors.router,
+        photos.router,
+        strategy.router,
+        buyer_replies.router,
+        items_history.router,
+        reminders.router,
+        support.router,
+    ]
+
+    attached = 0
+    skipped = 0
+    for router in routers:
+        try:
+            dp.include_router(router)
+            attached += 1
+        except RuntimeError as e:
+            if "already attached" in str(e):
+                skipped += 1
+                continue
+            raise
+
+    logger.info(f"Роутеры подключены: {attached}, пропущено: {skipped}")
 
 
-# ============================================================
-# ДИАГНОСТИЧЕСКИЙ ХЕНДЛЕР НА DP (для проверки)
-# ============================================================
-@dp.message(F.text == "/ping")
-async def debug_ping(message: Message) -> None:
-    logger.info(f"🎯 debug_ping: from_user={message.from_user.id}")
-    await message.answer("pong")
+_setup_dispatcher()
 
 
 # ============================================================
@@ -54,7 +95,7 @@ async def lifespan(app: FastAPI):
     try:
         await db.connect()
     except Exception as e:
-        logger.error(f"Не удалось подключиться к БД: {e}")
+        logger.error(f"Не удалось подключиться к БД на старте: {e}")
 
     try:
         if settings.bot_mode == "webhook":
@@ -114,11 +155,21 @@ async def telegram_webhook(request: Request) -> Response:
     return Response(status_code=status.HTTP_200_OK)
 
 
+# ============================================================
+# ЛОКАЛЬНЫЙ ЗАПУСК
+# ============================================================
 if __name__ == "__main__":
+    # ВАЖНО: только для локальной разработки!
+    # НЕ запускать через python -m app.main на BotHost —
+    # это вызовет двойной импорт и RuntimeError.
     if settings.bot_mode == "polling":
         asyncio.run(dp.start_polling(bot, skip_updates=True))
     else:
         import os
         import uvicorn
         port = int(os.getenv("PORT", "3000"))
+        logger.warning(
+            "Запуск через `python -m app.main` не рекомендуется на BotHost. "
+            "Используйте `uvicorn app.main:app`."
+        )
         uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
