@@ -20,6 +20,7 @@ from app.utils.keyboards import (
     create_listing_after_photo,
     create_listing_ready,
     create_listing_start,
+    listing_after_edit,
     listing_after_pick,
     listing_variants,
     main_menu_reply,
@@ -47,7 +48,6 @@ async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
     task_id = data.get("task_id")
 
     if task_id:
-        # Проверяем, что задача реально активна
         task = await db.fetch_one(
             "SELECT id FROM tasks WHERE id = %s AND status = 'active'",
             (task_id,),
@@ -56,7 +56,6 @@ async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
             return task_id
         logger.warning(f"task_id={task_id} из state не активен, ищу в БД")
 
-    # Ищем в БД
     task = await db.fetch_one(
         """
         SELECT id FROM tasks
@@ -74,6 +73,24 @@ async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
         return task["id"]
 
     return None
+
+
+# ============================================================
+# УТИЛИТА: получить выбранный listing из БД
+# ============================================================
+async def _get_selected_listing(user_id: int) -> dict | None:
+    """Возвращает последний выбранный листинг пользователя."""
+    return await db.fetch_one(
+        """
+        SELECT l.id, l.title, l.body, l.item_id, l.approach
+        FROM listings l
+        JOIN items i ON i.id = l.item_id
+        WHERE i.user_id = %s AND l.is_selected = TRUE
+        ORDER BY l.created_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
 
 
 # ============================================================
@@ -107,7 +124,6 @@ async def start_create(
         )
         return
 
-    # Активная задача
     if check.existing_task:
         task = check.existing_task
         collected = task.get("collected_data") or {}
@@ -129,7 +145,6 @@ async def start_create(
         )
         return
 
-    # Новая задача
     task = await task_manager.create_task(
         user=user,
         task_type="create_listing",
@@ -404,9 +419,22 @@ async def pick_variant(
 
     task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
-        await callback.answer("Задача потеряна. Начните заново.", show_alert=True)
-        await state.clear()
-        return
+        # Задача уже завершена? Ищем последний результат
+        task = await db.fetch_one(
+            """
+            SELECT * FROM tasks
+            WHERE user_id = %s AND task_type = 'create_listing'
+              AND result IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user["id"],),
+        )
+        if not task:
+            await callback.answer("Задача потеряна. Начните заново.", show_alert=True)
+            await state.clear()
+            return
+        task_id = task["id"]
 
     idx = {CB.LISTING_PICK_1: 0, CB.LISTING_PICK_2: 1, CB.LISTING_PICK_3: 2}[callback.data]
 
@@ -422,6 +450,7 @@ async def pick_variant(
 
     variant = variants[idx]
 
+    # Создаём карточку товара и сохраняем выбранный вариант
     item = await db.execute_returning(
         """
         INSERT INTO items (user_id, name)
@@ -445,6 +474,7 @@ async def pick_variant(
         ),
     )
 
+    # Завершаем задачу (лимит списывается)
     await task_manager.complete_task(
         task_id, status="done",
         result={"variants": variants, "selected_index": idx},
@@ -454,27 +484,42 @@ async def pick_variant(
         item_id=item["id"],
         selected_variant=variant,
         selected_variant_index=idx,
+        task_id=task_id,
     )
     await state.set_state(CreateStates.editing)
 
+    # Показываем выбранный вариант ЦЕЛИКОМ + все действия
+    approach_label = {
+        "factual": "Фактический",
+        "friendly": "Дружелюбный",
+        "alternative": "Альтернативный",
+    }.get(variant.get("approach", ""), f"Вариант {idx + 1}")
+
     await callback.message.answer(
-        f"✅ Выбран вариант: <b>{variant.get('title', '')}</b>\n\n"
-        f"Сохранено в карточку товара.",
+        f"✅ <b>Выбран вариант: {approach_label}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{variant.get('title', '')}</b>\n\n"
+        f"{variant.get('body', '')}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Что дальше?",
         reply_markup=listing_after_pick(),
     )
     await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data == CB.LISTING_COPY)
-async def show_again(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    variant = data.get("selected_variant")
-    if not variant:
+async def show_again(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    listing = await _get_selected_listing(user["id"])
+    if not listing:
         await callback.answer("Нечего показывать", show_alert=True)
         return
 
     await callback.message.answer(
-        f"<b>{variant.get('title', '')}</b>\n\n{variant.get('body', '')}"
+        f"<b>{listing['title']}</b>\n\n{listing['body']}"
     )
     await callback.answer()
 
@@ -490,16 +535,45 @@ async def regenerate(
 ) -> None:
     logger.info(f"regenerate: user={callback.from_user.id}")
 
-    task_id = await _resolve_task_id(state, user["id"])
-    if not task_id:
-        await callback.answer("Задача не найдена. Начните заново.", show_alert=True)
-        await state.clear()
+    # Ищем ЛЮБУЮ задачу create_listing с материалами (не только активную)
+    task = await db.fetch_one(
+        """
+        SELECT id, status FROM tasks
+        WHERE user_id = %s AND task_type = 'create_listing'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user["id"],),
+    )
+
+    if not task:
+        await callback.answer("Нечего перегенерировать. Начните заново.", show_alert=True)
         return
 
+    # Если задача завершена — создаём новую с теми же материалами
+    if task["status"] != "active":
+        old_task = await db.fetch_one(
+            "SELECT collected_data FROM tasks WHERE id = %s",
+            (task["id"],),
+        )
+        collected = old_task["collected_data"] if old_task else {}
+
+        new_task = await task_manager.create_task(
+            user=user,
+            task_type="create_listing",
+            collected_data=collected,
+        )
+        task_id = new_task["id"]
+        logger.info(f"Создана новая задача для перегенерации: id={task_id}")
+    else:
+        task_id = task["id"]
+
     await state.update_data(task_id=task_id)
+    await state.set_state(CreateStates.choosing)
+
     await callback.answer("Генерирую заново…")
     await callback.message.answer(
-        "🔄 Генерирую заново… Это не потратит лимит — ты внутри той же задачи."
+        "🔄 Генерирую заново…"
     )
     await _run_generation(callback.message, state, task_id)
 
@@ -508,23 +582,35 @@ async def regenerate(
 # РЕДАКТИРОВАНИЕ
 # ============================================================
 @router.callback_query(F.data == CB.LISTING_EDIT)
-async def edit_listing(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    variant = data.get("selected_variant")
+async def edit_listing(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    """Начинает редактирование выбранного варианта."""
+    logger.info(f"edit_listing: user={callback.from_user.id}")
 
-    if not variant:
-        await callback.answer("Сначала выбери вариант", show_alert=True)
+    listing = await _get_selected_listing(user["id"])
+    if not listing:
+        await callback.answer(
+            "Сначала выбери вариант (1/2/3), потом редактируй.",
+            show_alert=True,
+        )
         return
 
-    await state.update_data(
-        edit_target="body",
-        edit_item_id=data.get("item_id"),
-    )
+    await state.update_data(item_id=listing["item_id"])
+    await state.set_state(CreateStates.editing)
+
     await callback.message.answer(
-        "✏️ <b>Редактирование</b>\n\n"
-        "Пришли новый текст объявления одним сообщением — я заменю выбранный вариант.\n\n"
-        "Если хочешь изменить заголовок — напиши его отдельным сообщением, "
-        "начиная со слова «Заголовок:».",
+        f"✏️ <b>Редактирование</b>\n\n"
+        f"<b>Текущий текст:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{listing['title']}</b>\n\n"
+        f"{listing['body']}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Пришли <b>новый текст</b> объявления одним сообщением.\n\n"
+        f"Или <b>новый заголовок</b>, начиная со слова «Заголовок:».\n\n"
+        f"Пример: <code>Заголовок: Диван 180 см б/у</code>"
     )
     await callback.answer()
 
@@ -547,25 +633,41 @@ async def on_edit_text(
         await state.clear()
         return
 
+    # Редактируем заголовок или тело
     if text.lower().startswith("заголовок:"):
         new_title = text.split(":", 1)[1].strip()
         await db.execute(
             "UPDATE listings SET title = %s WHERE item_id = %s AND is_selected = TRUE",
             (new_title, item_id),
         )
-        await message.answer(f"✅ Заголовок обновлён:\n<b>{new_title}</b>")
+        action = "Заголовок обновлён"
     else:
         await db.execute(
             "UPDATE listings SET body = %s WHERE item_id = %s AND is_selected = TRUE",
             (text, item_id),
         )
-        await message.answer("✅ Текст объявления обновлён.")
+        action = "Текст обновлён"
+
+    # Показываем обновлённый текст
+    updated = await db.fetch_one(
+        "SELECT title, body FROM listings WHERE item_id = %s AND is_selected = TRUE",
+        (item_id,),
+    )
+
+    if not updated:
+        await message.answer("Ошибка: не удалось загрузить обновлённый текст.")
+        return
 
     await message.answer(
-        "Можно продолжать редактировать или вернуться в меню.",
-        reply_markup=main_menu_reply(),
+        f"✅ <b>{action}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{updated['title']}</b>\n\n"
+        f"{updated['body']}\n"
+        f"━━━━━━━━━━━━━━━━━━━",
+        reply_markup=listing_after_edit(),
     )
-    await state.clear()
+
+    # НЕ сбрасываем состояние — пользователь может редактировать ещё
 
 
 # ============================================================

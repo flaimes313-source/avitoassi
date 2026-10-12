@@ -53,8 +53,6 @@ class CB:
     CREATE_DONE_MATERIALS = "create:done_materials"
     CREATE_GENERATE = "create:generate"
     CREATE_PROCEED_AS_IS = "create:proceed_as_is"
-    CREATE_ANSWER_MORE = "create:answer_more"
-    CREATE_ANSWER_SKIP = "create:answer_skip"
 
     # Выбор варианта (1/2/3)
     LISTING_PICK_1 = "listing:pick:1"
@@ -215,16 +213,6 @@ def confirm_keyboard(yes_text: str = "✅ Да", no_text: str = "❌ Нет") ->
     return builder.as_markup()
 
 
-def skip_or_answer() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        btn("🤷 Не знаю", CB.DONT_KNOW),
-        btn("⏭ Пропустить", CB.SKIP),
-    )
-    builder.row(btn("❌ Отменить", CB.CANCEL))
-    return builder.as_markup()
-
-
 def remove_reply_keyboard() -> ReplyKeyboardRemove:
     return ReplyKeyboardRemove()
 
@@ -292,24 +280,38 @@ def create_listing_question() -> InlineKeyboardMarkup:
 
 
 def listing_variants() -> InlineKeyboardMarkup:
-    """Выбор одного из 3 сгенерированных вариантов."""
+    """
+    Выбор одного из 3 сгенерированных вариантов.
+    БЕЗ кнопки «Редактировать» — сначала надо выбрать вариант.
+    """
     builder = InlineKeyboardBuilder()
     builder.row(btn("1️⃣ Фактический", CB.LISTING_PICK_1))
     builder.row(btn("2️⃣ Дружелюбный", CB.LISTING_PICK_2))
     builder.row(btn("3️⃣ Альтернативный", CB.LISTING_PICK_3))
-    builder.row(
-        btn("🔄 Перегенерировать", CB.LISTING_REGEN),
-        btn("✏️ Редактировать", CB.LISTING_EDIT),
-    )
+    builder.row(btn("🔄 Перегенерировать", CB.LISTING_REGEN))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
 
 def listing_after_pick() -> InlineKeyboardMarkup:
-    """Действия после выбора варианта."""
+    """
+    Действия после выбора варианта.
+    Здесь уже есть «Редактировать» — вариант выбран.
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(btn("📋 Показать ещё раз", CB.LISTING_COPY))
-    builder.row(btn("💾 Сохранить в карточку", CB.LISTING_SAVE))
+    builder.row(btn("✏️ Редактировать", CB.LISTING_EDIT))
+    builder.row(btn("🔄 Перегенерировать", CB.LISTING_REGEN))
+    builder.row(btn("📋 Показать текст ещё раз", CB.LISTING_COPY))
+    builder.row(btn("📈 Стратегия продвижения", CB.MENU_STRATEGY))
+    builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
+    return builder.as_markup()
+
+
+def listing_after_edit() -> InlineKeyboardMarkup:
+    """Действия после редактирования текста."""
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("✏️ Редактировать ещё", CB.LISTING_EDIT))
+    builder.row(btn("🔄 Перегенерировать", CB.LISTING_REGEN))
     builder.row(btn("📈 Стратегия продвижения", CB.MENU_STRATEGY))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
