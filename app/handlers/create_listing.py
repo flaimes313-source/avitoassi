@@ -1,7 +1,5 @@
 ﻿"""
 Сценарий «Создать объявление» (блок 3 ТЗ).
-
-Сбор фото и текста в любом порядке → генерация 3 вариантов через GigaChat.
 """
 
 from __future__ import annotations
@@ -34,7 +32,7 @@ router = Router(name="create_listing")
 # СОСТОЯНИЯ
 # ============================================================
 class CreateStates(StatesGroup):
-    collecting = State()   # сбор материалов (фото + текст)
+    collecting = State()
 
 
 # ============================================================
@@ -45,11 +43,11 @@ class CreateStates(StatesGroup):
 async def start_create(
     event: Message | CallbackQuery,
     state: FSMContext,
-    user: dict,
+    user: dict | None,
     db,
 ) -> None:
-    """Точка входа в сценарий создания объявления."""
-    # Универсально достаём message и user_id
+    logger.info(f"start_create: событие от {type(event).__name__}")
+
     if isinstance(event, CallbackQuery):
         message = event.message
         await event.answer()
@@ -60,7 +58,7 @@ async def start_create(
         await message.answer("Ошибка: пользователь не найден. Напишите /start.")
         return
 
-    # 1. Проверяем лимит
+    # Проверка лимита
     check = await task_manager.check_limit(user, "create_listing")
     if not check.allowed:
         await message.answer(
@@ -69,7 +67,7 @@ async def start_create(
         )
         return
 
-    # 2. Если есть активная задача — предлагаем продолжить
+    # Активная задача — предлагаем продолжить
     if check.existing_task:
         task = check.existing_task
         collected = task.get("collected_data") or {}
@@ -84,13 +82,14 @@ async def start_create(
             summary_lines.append(f"• Текст: {preview}")
 
         await state.set_state(CreateStates.collecting)
+        await state.update_data(task_id=task["id"])
         await message.answer(
             "\n".join(summary_lines) + "\n\nПродолжаем или начнём заново?",
             reply_markup=create_listing_ready(),
         )
         return
 
-    # 3. Создаём новую задачу
+    # Новая задача
     task = await task_manager.create_task(
         user=user,
         task_type="create_listing",
@@ -104,14 +103,13 @@ async def start_create(
         "Пришли материалы о товаре в любом порядке:\n"
         "• 📸 Фото (можно несколько)\n"
         "• ✏️ Текст: что это, состояние, характеристики, цена\n\n"
-        "Когда закончишь — нажми «✅ Материалов достаточно».\n\n"
-        "Если чего-то не знаешь — не страшно, я подскажу.",
+        "Когда закончишь — нажми «✅ Материалов достаточно».",
         reply_markup=create_listing_start(),
     )
 
 
 # ============================================================
-# ПОЛУЧЕНИЕ ФОТО
+# ФОТО
 # ============================================================
 @router.message(CreateStates.collecting, F.photo)
 async def on_photo_received(
@@ -126,20 +124,17 @@ async def on_photo_received(
         await message.answer("Ошибка: задача не найдена. Начните заново.")
         return
 
-    # Берём максимальный размер фото (последний в списке)
     photo = message.photo[-1]
     file_id = photo.file_id
     file_unique_id = photo.file_unique_id
     file_size = photo.file_size or 0
 
-    # Достаём текущий список фото и добавляем
     task = await db.fetch_one("SELECT collected_data FROM tasks WHERE id = %s", (task_id,))
     if not task:
         return
     collected = task["collected_data"] or {}
     photos = collected.get("photos", [])
 
-    # Дедупликация по file_unique_id
     if any(p.get("file_unique_id") == file_unique_id for p in photos):
         await message.answer("Это фото уже добавлено.")
         return
@@ -155,7 +150,6 @@ async def on_photo_received(
         (to_jsonb({"photos": photos}), task_id),
     )
 
-    # Записываем в историю задачи
     await task_manager.log_message(
         task_id, "user", f"[фото] размер {file_size // 1024} КБ",
         attachments=[{"type": "photo", "file_id": file_id}],
@@ -169,7 +163,7 @@ async def on_photo_received(
 
 
 # ============================================================
-# ПОЛУЧЕНИЕ ТЕКСТА
+# ТЕКСТ
 # ============================================================
 @router.message(CreateStates.collecting, F.text, ~F.text.startswith("/"))
 async def on_text_received(
@@ -178,8 +172,7 @@ async def on_text_received(
     user: dict,
     db,
 ) -> None:
-    # Игнорируем нажатия на Reply-кнопки главного меню
-    # (они обрабатываются другими хендлерами)
+    # Игнорируем Reply-кнопки главного меню
     if message.text in {
         "📝 Создать объявление", "🛠 Улучшить объявление",
         "🔍 Анализ конкурентов", "📸 Помощь с фотографиями",
@@ -201,7 +194,6 @@ async def on_text_received(
     collected = task["collected_data"] or {}
     existing = collected.get("extra", "")
 
-    # Складываем текст через пустую строку
     new_text = (existing + "\n\n" + message.text).strip() if existing else message.text
 
     await db.execute(
@@ -221,7 +213,7 @@ async def on_text_received(
 
 
 # ============================================================
-# ПЕРЕХОД К ГЕНЕРАЦИИ
+# КНОПКИ СБОРА
 # ============================================================
 @router.callback_query(F.data == CB.CREATE_ADD_PHOTO)
 async def prompt_add_photo(callback: CallbackQuery, state: FSMContext) -> None:
@@ -238,37 +230,50 @@ async def prompt_add_text(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+# ============================================================
+# КНОПКА ГЕНЕРАЦИИ
+# ============================================================
 @router.callback_query(F.data == CB.CREATE_DONE_MATERIALS)
+@router.callback_query(F.data == CB.CREATE_GENERATE)
 async def materials_done(callback: CallbackQuery, state: FSMContext) -> None:
+    logger.info(f"materials_done вызван: user={callback.from_user.id}, data={callback.data}")
+
+    # Убедимся, что состояние установлено
+    current_state = await state.get_state()
+    logger.info(f"   текущее состояние: {current_state}")
+
+    await callback.answer("Запускаю генерацию…")
     await callback.message.answer(
         "✅ Материалы собраны.\n\n"
-        "Запускаю генерацию трёх вариантов. Это займёт до 30 секунд…",
-        reply_markup=None,
+        "Запускаю генерацию трёх вариантов. Это займёт до 30 секунд…"
     )
-    await callback.answer()
     await _run_generation(callback.message, state)
 
 
 # ============================================================
-# ГЕНЕРАЦИЯ ЧЕРЕЗ GIGACHAT
+# ГЕНЕРАЦИЯ
 # ============================================================
 async def _run_generation(message: Message, state: FSMContext) -> None:
-    """Запускает генерацию 3 вариантов объявления."""
+    logger.info("_run_generation: старт")
+
     data = await state.get_data()
     task_id = data.get("task_id")
     if not task_id:
+        logger.warning("_run_generation: task_id не найден")
         await message.answer("Ошибка: задача не найдена.")
         return
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
     if not task:
+        logger.warning(f"_run_generation: задача {task_id} не найдена в БД")
         return
 
     collected = task["collected_data"] or {}
     photos = collected.get("photos", [])
     text = collected.get("extra", "").strip()
 
-    # Минимальная проверка
+    logger.info(f"_run_generation: photos={len(photos)}, text_length={len(text)}")
+
     if not text and not photos:
         await message.answer(
             "Недостаточно данных для генерации. "
@@ -277,20 +282,22 @@ async def _run_generation(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Собираем user prompt
     prompt_data = {
         "extra": text,
         "photos_count": len(photos),
     }
     user_prompt = build_user_prompt(prompt_data)
+    logger.info(f"_run_generation: промпт собран, длина {len(user_prompt)}")
 
     try:
+        logger.info("_run_generation: вызов GigaChat…")
         result = await gigachat_service.generate_json(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.6,
             max_tokens=2500,
         )
+        logger.info(f"_run_generation: GigaChat ответил, ключи={list(result.keys())}")
     except Exception as e:
         logger.exception(f"Ошибка генерации: {e}")
         await task_manager.complete_task(
@@ -304,7 +311,7 @@ async def _run_generation(message: Message, state: FSMContext) -> None:
         return
 
     variants = result.get("variants", [])
-    if not variants or len(variants) < 1:
+    if not variants:
         await task_manager.complete_task(
             task_id, status="failed", technical_failure=True,
         )
@@ -314,10 +321,8 @@ async def _run_generation(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Сохраняем варианты в результат задачи
     await task_manager.set_result(task_id, {"variants": variants})
 
-    # Показываем варианты
     approach_names = {
         "factual": "1️⃣ Фактический",
         "friendly": "2️⃣ Дружелюбный",
@@ -352,13 +357,14 @@ async def pick_variant(
     user: dict,
     db,
 ) -> None:
+    logger.info(f"pick_variant: {callback.data}")
+
     data = await state.get_data()
     task_id = data.get("task_id")
     if not task_id:
         await callback.answer("Задача потеряна. Начните заново.", show_alert=True)
         return
 
-    # Определяем номер
     idx = {CB.LISTING_PICK_1: 0, CB.LISTING_PICK_2: 1, CB.LISTING_PICK_3: 2}[callback.data]
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
@@ -373,7 +379,6 @@ async def pick_variant(
 
     variant = variants[idx]
 
-    # Создаём карточку товара (item) и запись listing
     item = await db.execute_returning(
         """
         INSERT INTO items (user_id, name)
@@ -397,14 +402,17 @@ async def pick_variant(
         ),
     )
 
+    # Задача успешно завершена — списываем лимит
+    await task_manager.complete_task(
+        task_id, status="done",
+        result={"variants": variants, "selected_index": idx},
+    )
+
     await state.update_data(item_id=item["id"], selected_variant=variant)
 
     await callback.message.answer(
         f"✅ Выбран вариант: <b>{variant.get('title', '')}</b>\n\n"
-        f"Что дальше?\n"
-        f"• 📋 Показать ещё раз — если хочешь скопировать\n"
-        f"• 💾 Уже сохранено в карточку товара\n"
-        f"• 📈 Получить стратегию продвижения",
+        f"Сохранено в карточку товара. Что дальше?",
         reply_markup=listing_after_pick(),
     )
     await callback.answer("Сохранено")
@@ -424,20 +432,17 @@ async def show_again(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-# ============================================================
-# ПЕРЕГЕНЕРАЦИЯ
-# ============================================================
 @router.callback_query(F.data == CB.LISTING_REGEN)
 async def regenerate(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer("Генерирую заново…")
     await callback.message.answer(
         "🔄 Генерирую заново… Это не потратит лимит — ты внутри той же задачи."
     )
-    await callback.answer()
     await _run_generation(callback.message, state)
 
 
 # ============================================================
-# ОТМЕНА СЦЕНАРИЯ
+# ОТМЕНА СЦЕНАРИЯ (только в состоянии collecting)
 # ============================================================
 @router.callback_query(F.data == CB.CANCEL, CreateStates.collecting)
 async def cancel_create(
@@ -446,13 +451,21 @@ async def cancel_create(
     user: dict,
     db,
 ) -> None:
+    logger.info(f"cancel_create: user={callback.from_user.id}")
+
     data = await state.get_data()
     task_id = data.get("task_id")
     if task_id:
         await task_manager.complete_task(task_id, status="cancelled")
+        logger.info(f"Задача {task_id} отменена")
+
     await state.clear()
 
-    await callback.message.edit_text("❌ Создание объявления отменено.")
+    try:
+        await callback.message.edit_text("❌ Создание объявления отменено.")
+    except Exception as e:
+        logger.debug(f"edit_text не сработал: {e}")
+
     await callback.message.answer(
         "Возвращаю в главное меню.",
         reply_markup=main_menu_reply(),
