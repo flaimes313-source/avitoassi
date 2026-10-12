@@ -1,8 +1,5 @@
 """
 Конфигурация приложения.
-
-Читает переменные окружения из .env, валидирует их и предоставляет
-типобезопасный доступ через объект `settings`.
 """
 
 from typing import Literal
@@ -54,8 +51,8 @@ class Settings(BaseSettings):
         description="Scope: GIGACHAT_API_PERS / GIGACHAT_API_B2B / GIGACHAT_API_CORP",
     )
     gigachat_model: str = Field(
-        default="GigaChat",
-        description="Модель: GigaChat, GigaChat-Pro, GigaChat-Max, GigaChat-3-Ultra",
+        default="GigaChat-2-Pro",
+        description="Модель: GigaChat-2, GigaChat-2-Pro, GigaChat-2-Max",
     )
     gigachat_temperature: float = Field(default=0.6, ge=0.0, le=1.0)
     gigachat_max_tokens: int = Field(default=2000, gt=0)
