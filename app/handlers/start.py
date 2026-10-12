@@ -30,6 +30,9 @@ class OnboardingStates(StatesGroup):
     waiting_timezone = State()
 
 
+# ============================================================
+# /start
+# ============================================================
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
@@ -38,10 +41,19 @@ async def cmd_start(
     db,
 ) -> None:
     tg_user = message.from_user
+    logger.info(
+        f"cmd_start вызван: user_id={tg_user.id if tg_user else None}, "
+        f"user_is_none={user is None}, "
+        f"onboarded={user.get('onboarded') if user else None}"
+    )
+
     if tg_user is None:
+        logger.warning("cmd_start: from_user отсутствует, выходим")
         return
 
+    # --- Новый пользователь ---
     if user is None:
+        logger.info("Регистрация нового пользователя...")
         user = await db.execute_returning(
             """
             INSERT INTO users (telegram_id, username, first_name, last_name)
@@ -52,43 +64,68 @@ async def cmd_start(
         )
         logger.info(f"Зарегистрирован новый пользователь: {tg_user.id}")
 
-        await message.answer(
-            f"👋 Привет, {tg_user.first_name or 'друг'}!\n\n"
-            "Я — твой помощник для продаж на Авито.\n\n"
-            "Помогу:\n"
-            "• 📝 составить объявление, которое заметят\n"
-            "• 🛠 улучшить уже опубликованное\n"
-            "• 🔍 проанализировать конкурентов\n"
-            "• 📸 подобрать лучшие фото\n"
-            "• 📈 выстроить стратегию продвижения\n"
-            "• 💬 ответить покупателям\n\n"
-            "Сначала — короткая настройка. Это займёт минуту."
-        )
+        try:
+            await message.answer(
+                f"👋 Привет, {tg_user.first_name or 'друг'}!\n\n"
+                "Я — твой помощник для продаж на Авито.\n\n"
+                "Помогу:\n"
+                "• 📝 составить объявление, которое заметят\n"
+                "• 🛠 улучшить уже опубликованное\n"
+                "• 🔍 проанализировать конкурентов\n"
+                "• 📸 подобрать лучшие фото\n"
+                "• 📈 выстроить стратегию продвижения\n"
+                "• 💬 ответить покупателям\n\n"
+                "Сначала — короткая настройка. Это займёт минуту."
+            )
+            logger.info("Отправлено приветствие")
+        except Exception as e:
+            logger.exception(f"Ошибка отправки приветствия: {e}")
+
         await state.set_state(OnboardingStates.waiting_privacy)
-        await message.answer(
-            "📄 <b>Что я храню и как это использую</b>\n\n"
-            "• Твой Telegram ID — чтобы помнить настройки\n"
-            "• Тексты и фото объявлений — чтобы давать советы\n"
-            "• Данные отправляются в GigaChat для генерации текста\n"
-            "• Я не храню платёжные реквизиты и пароли\n"
-            "• В любой момент можно удалить все данные в ⚙️ Настройках\n\n"
-            "Продолжая, ты соглашаешься с этим.",
-            reply_markup=onboarding_privacy(),
-        )
+
+        try:
+            await message.answer(
+                "📄 <b>Что я храню и как это использую</b>\n\n"
+                "• Твой Telegram ID — чтобы помнить настройки\n"
+                "• Тексты и фото объявлений — чтобы давать советы\n"
+                "• Данные отправляются в GigaChat для генерации текста\n"
+                "• Я не храню платёжные реквизиты и пароли\n"
+                "• В любой момент можно удалить все данные в ⚙️ Настройках\n\n"
+                "Продолжая, ты соглашаешься с этим.",
+                reply_markup=onboarding_privacy(),
+            )
+            logger.info("Отправлено сообщение о приватности")
+        except Exception as e:
+            logger.exception(f"Ошибка отправки сообщения о приватности: {e}")
+
         return
 
+    # --- Пользователь есть, онбординг не пройден ---
     if not user["onboarded"]:
+        logger.info("Пользователь не прошёл онбординг, показываю приватность")
         await state.set_state(OnboardingStates.waiting_privacy)
-        await message.answer(
-            "Продолжим настройку. Подтверди, пожалуйста, обработку данных:",
-            reply_markup=onboarding_privacy(),
-        )
+
+        try:
+            await message.answer(
+                "Продолжим настройку. Подтверди, пожалуйста, обработку данных:",
+                reply_markup=onboarding_privacy(),
+            )
+            logger.info("Отправлено сообщение о приватности (повторно)")
+        except Exception as e:
+            logger.exception(f"Ошибка отправки повторной приватности: {e}")
+
         return
 
+    # --- Пользователь прошёл онбординг ---
+    logger.info("Пользователь прошёл онбординг, показываю главное меню")
     await state.clear()
     await _show_main_menu(message)
+    logger.info("Главное меню отправлено")
 
 
+# ============================================================
+# Онбординг — согласие
+# ============================================================
 @router.callback_query(F.data == CB.ONBOARD_ACCEPT_PRIVACY)
 async def on_privacy_accepted(
     callback: CallbackQuery,
@@ -96,6 +133,8 @@ async def on_privacy_accepted(
     user: dict,
     db,
 ) -> None:
+    logger.info(f"on_privacy_accepted: user_id={callback.from_user.id}")
+
     if user is None:
         await callback.answer("Ошибка: пользователь не найден", show_alert=True)
         return
@@ -105,48 +144,69 @@ async def on_privacy_accepted(
         (user["id"],),
     )
 
-    await callback.message.edit_text(
-        "✅ Принято.\n\n"
-        "Теперь выбери свой часовой пояс — он нужен, чтобы напоминания "
-        "приходили в правильное время."
-    )
+    try:
+        await callback.message.edit_text(
+            "✅ Принято.\n\n"
+            "Теперь выбери свой часовой пояс — он нужен, чтобы напоминания "
+            "приходили в правильное время."
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка edit_text: {e}")
+
     await state.set_state(OnboardingStates.waiting_timezone)
-    await callback.message.answer(
-        "Напиши город или часовой пояс.\n\n"
-        "Примеры:\n"
-        "• <code>Москва</code>\n"
-        "• <code>Europe/Moscow</code>\n"
-        "• <code>Екатеринбург</code>\n"
-        "• <code>Asia/Novosibirsk</code>\n\n"
-        "Если не знаешь — напиши «Москва», потом изменишь в ⚙️ Настройках.",
-        reply_markup=remove_reply_keyboard(),
-    )
+
+    try:
+        await callback.message.answer(
+            "Напиши город или часовой пояс.\n\n"
+            "Примеры:\n"
+            "• <code>Москва</code>\n"
+            "• <code>Europe/Moscow</code>\n"
+            "• <code>Екатеринбург</code>\n"
+            "• <code>Asia/Novosibirsk</code>\n\n"
+            "Если не знаешь — напиши «Москва», потом изменишь в ⚙️ Настройках.",
+            reply_markup=remove_reply_keyboard(),
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки запроса таймзоны: {e}")
+
     await callback.answer()
 
 
+# ============================================================
+# Информация о приватности
+# ============================================================
 @router.callback_query(F.data == CB.SET_PRIVACY_INFO)
 async def show_privacy_info(callback: CallbackQuery) -> None:
-    await callback.message.answer(
-        "📄 <b>Что я храню и куда передаю</b>\n\n"
-        "<b>Храню:</b>\n"
-        "• Твой Telegram ID, имя, username\n"
-        "• Часовой пояс\n"
-        "• Тексты и фото объявлений, которые ты присылаешь\n"
-        "• Статистику и историю работы с товарами\n"
-        "• Идентификаторы платежей (без реквизитов карты)\n\n"
-        "<b>Передаю внешним сервисам:</b>\n"
-        "• <b>GigaChat</b> — тексты и фото объявлений для генерации\n"
-        "• <b>ЮKassa</b> — сумму и ID платежа для оплаты\n"
-        "• <b>Telegram</b> — сами сообщения (это мессенджер)\n\n"
-        "<b>НЕ храню:</b>\n"
-        "• Пароли, номера карт, CVV\n"
-        "• Оригиналы фото дольше 24 часов\n\n"
-        "<b>Удаление данных:</b>\n"
-        "В ⚙️ Настройках → «🗑 Удалить мои данные» — удалю всё безвозвратно."
-    )
+    logger.info(f"show_privacy_info: user_id={callback.from_user.id}")
+
+    try:
+        await callback.message.answer(
+            "📄 <b>Что я храню и куда передаю</b>\n\n"
+            "<b>Храню:</b>\n"
+            "• Твой Telegram ID, имя, username\n"
+            "• Часовой пояс\n"
+            "• Тексты и фото объявлений, которые ты присылаешь\n"
+            "• Статистику и историю работы с товарами\n"
+            "• Идентификаторы платежей (без реквизитов карты)\n\n"
+            "<b>Передаю внешним сервисам:</b>\n"
+            "• <b>GigaChat</b> — тексты и фото объявлений для генерации\n"
+            "• <b>ЮKassa</b> — сумму и ID платежа для оплаты\n"
+            "• <b>Telegram</b> — сами сообщения (это мессенджер)\n\n"
+            "<b>НЕ храню:</b>\n"
+            "• Пароли, номера карт, CVV\n"
+            "• Оригиналы фото дольше 24 часов\n\n"
+            "<b>Удаление данных:</b>\n"
+            "В ⚙️ Настройках → «🗑 Удалить мои данные» — удалю всё безвозвратно."
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки информации о приватности: {e}")
+
     await callback.answer()
 
 
+# ============================================================
+# Онбординг — часовой пояс
+# ============================================================
 CITY_TO_TZ = {
     "москва": "Europe/Moscow",
     "питер": "Europe/Moscow",
@@ -174,6 +234,8 @@ async def on_timezone_entered(
     db,
 ) -> None:
     raw = (message.text or "").strip()
+    logger.info(f"on_timezone_entered: raw={raw!r}")
+
     if not raw:
         await message.answer("Пустое сообщение. Напиши город или часовой пояс.")
         return
@@ -196,6 +258,7 @@ async def on_timezone_entered(
         f"✅ Часовой пояс: <b>{tz_name}</b>\n\n"
         "Настройка завершена. Открываю меню — выбирай, с чего начнём.",
     )
+    logger.info(f"Таймзона сохранена: {tz_name}")
     await _show_main_menu(message)
 
 
@@ -210,55 +273,83 @@ def _resolve_timezone(raw: str) -> str | None:
         return None
 
 
+# ============================================================
+# Показ главного меню
+# ============================================================
 async def _show_main_menu(message: Message) -> None:
-    await message.answer(
-        "🏠 <b>Главное меню</b>\n\n"
-        "Выбери раздел внизу экрана. В любой момент можно вернуться сюда "
-        "командой /start.",
-        reply_markup=main_menu_reply(),
-    )
+    try:
+        await message.answer(
+            "🏠 <b>Главное меню</b>\n\n"
+            "Выбери раздел внизу экрана. В любой момент можно вернуться сюда "
+            "командой /start.",
+            reply_markup=main_menu_reply(),
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки главного меню: {e}")
 
 
+# ============================================================
+# Возврат в меню по кнопке
+# ============================================================
 @router.callback_query(F.data == CB.MENU_MAIN)
 async def back_to_main_menu(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
+    logger.info(f"back_to_main_menu: user_id={callback.from_user.id}")
     await state.clear()
-    await callback.message.answer(
-        "🏠 <b>Главное меню</b>",
-        reply_markup=main_menu_reply(),
-    )
+    try:
+        await callback.message.answer(
+            "🏠 <b>Главное меню</b>",
+            reply_markup=main_menu_reply(),
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки меню: {e}")
     await callback.answer()
 
 
+# ============================================================
+# /help
+# ============================================================
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(
-        "❓ <b>Помощь</b>\n\n"
-        "Что я умею:\n"
-        "• 📝 Создать объявление — по фото и тексту составлю 3 варианта\n"
-        "• 🛠 Улучшить объявление — разберу, что мешает продажам\n"
-        "• 🔍 Анализ конкурентов — сравню и подскажу, чем выделиться\n"
-        "• 📸 Помощь с фотографиями — выберу главное, подскажу ракурсы\n"
-        "• 📈 Стратегия продвижения — что делать по шагам\n"
-        "• 💬 Ответы покупателям — сформулирую вежливый ответ\n"
-        "• 📂 Мои объявления — история и статистика\n"
-        "• 💳 Тариф и подписка — лимиты и PRO\n"
-        "• ⚙️ Настройки — часовой пояс, напоминания, удаление данных\n\n"
-        "Если что-то не работает — пиши в ⚙️ Настройки → 💬 Поддержка.",
-        reply_markup=back_to_menu(),
-    )
+    logger.info(f"cmd_help: user_id={message.from_user.id if message.from_user else None}")
+
+    try:
+        await message.answer(
+            "❓ <b>Помощь</b>\n\n"
+            "Что я умею:\n"
+            "• 📝 Создать объявление — по фото и тексту составлю 3 варианта\n"
+            "• 🛠 Улучшить объявление — разберу, что мешает продажам\n"
+            "• 🔍 Анализ конкурентов — сравню и подскажу, чем выделиться\n"
+            "• 📸 Помощь с фотографиями — выберу главное, подскажу ракурсы\n"
+            "• 📈 Стратегия продвижения — что делать по шагам\n"
+            "• 💬 Ответы покупателям — сформулирую вежливый ответ\n"
+            "• 📂 Мои объявления — история и статистика\n"
+            "• 💳 Тариф и подписка — лимиты и PRO\n"
+            "• ⚙️ Настройки — часовой пояс, напоминания, удаление данных\n\n"
+            "Если что-то не работает — пиши в ⚙️ Настройки → 💬 Поддержка.",
+            reply_markup=back_to_menu(),
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки /help: {e}")
 
 
+# ============================================================
+# Отмена текущей задачи
+# ============================================================
 @router.callback_query(F.data == CB.CANCEL)
 async def cancel_current(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
+    logger.info(f"cancel_current: user_id={callback.from_user.id}")
     await state.clear()
-    await callback.message.edit_text(
-        "❌ Отменено.\n\n"
-        "Если нужно начать заново — выбери раздел в меню."
-    )
+    try:
+        await callback.message.edit_text(
+            "❌ Отменено.\n\n"
+            "Если нужно начать заново — выбери раздел в меню."
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка edit_text при отмене: {e}")
     await callback.answer("Отменено")
