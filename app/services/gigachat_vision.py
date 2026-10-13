@@ -6,6 +6,7 @@
 - Загрузка в GigaChat через upload_file
 - Анализ изображений с текстовым промптом
 - Генерация с фото (свободный текст)
+- Восстановление обрезанного JSON
 - Удаление файлов из GigaChat после анализа
 
 Модель: GigaChat-2-Pro (поддерживает Vision).
@@ -16,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 from typing import Any
 
 from aiogram import Bot
@@ -24,6 +26,47 @@ from gigachat.models import Chat, Messages, MessagesRole
 from loguru import logger
 
 from app.config import settings
+
+
+# ============================================================
+# ВОССТАНОВЛЕНИЕ ОБРЕЗАННОГО JSON
+# ============================================================
+def _try_recover_json(text: str) -> dict | None:
+    """
+    Пытается восстановить обрезанный JSON.
+
+    GigaChat при превышении max_tokens обрезает ответ посередине.
+    Для ответов с массивом variants — ищем все полные объекты
+    вариантов и собираем из них валидный JSON.
+    """
+    try:
+        # Ищем все полные объекты вида {"approach": "...", "title": "...", "body": "..."}
+        pattern = re.compile(
+            r'\{\s*"approach"\s*:\s*"[^"]*"\s*,\s*'
+            r'"title"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*'
+            r'"body"\s*:\s*"(?:[^"\\]|\\.)*"\s*\}',
+            re.DOTALL,
+        )
+        matches = pattern.findall(text)
+
+        if not matches:
+            return None
+
+        variants = []
+        for m in matches:
+            try:
+                variants.append(json.loads(m))
+            except json.JSONDecodeError:
+                continue
+
+        if variants:
+            logger.info(f"Recovery: удалось восстановить {len(variants)} вариантов")
+            return {"variants": variants}
+
+    except Exception as e:
+        logger.debug(f"Recovery не удался: {e}")
+
+    return None
 
 
 class GigaChatVisionService:
@@ -130,7 +173,6 @@ class GigaChatVisionService:
         """
         Загружает фото из Telegram в GigaChat.
         Возвращает список giga_file_id.
-        Пропускает проблемные фото с логированием.
         """
         photos = photos[:max_photos]
         uploaded_ids: list[str] = []
@@ -166,15 +208,10 @@ class GigaChatVisionService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.6,
-        max_tokens: int = 2500,
+        max_tokens: int = 3500,
         max_photos: int = 10,
     ) -> str:
-        """
-        Генерация с фото (свободный текст).
-
-        Используется в блоке 3 — создание объявления.
-        Возвращает текст ответа GigaChat.
-        """
+        """Генерация с фото (свободный текст)."""
         if not photos:
             raise ValueError("Нет фото для анализа")
 
@@ -204,14 +241,10 @@ class GigaChatVisionService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.4,
-        max_tokens: int = 2500,
+        max_tokens: int = 3500,
         max_photos: int = 10,
     ) -> dict:
-        """
-        Анализ с фото, возвращает распарсенный JSON.
-
-        Используется в блоках 5 и 6.
-        """
+        """Анализ с фото, возвращает распарсенный JSON."""
         if not photos:
             raise ValueError("Нет фото для анализа")
 
@@ -231,6 +264,7 @@ class GigaChatVisionService:
                 max_tokens,
             )
 
+            # Чистим markdown-обёртки
             cleaned = result.strip()
             if cleaned.startswith("```json"):
                 cleaned = cleaned[7:]
@@ -245,11 +279,17 @@ class GigaChatVisionService:
             except json.JSONDecodeError as e:
                 logger.error(f"Vision: не удалось распарсить JSON: {e}")
                 logger.debug(f"Сырой ответ: {result[:500]}")
+
+                recovered = _try_recover_json(cleaned)
+                if recovered is not None:
+                    logger.warning("Vision: JSON восстановлен после обрезки")
+                    return recovered
+
                 raise RuntimeError(f"GigaChat вернул невалидный JSON: {e}")
         finally:
             await self._cleanup(uploaded_ids)
 
-    # Алиас для обратной совместимости с предыдущей версией
+    # Алиас для обратной совместимости
     async def analyze_photos(
         self,
         bot: Bot,
@@ -257,7 +297,7 @@ class GigaChatVisionService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.4,
-        max_tokens: int = 2500,
+        max_tokens: int = 3500,
         max_photos: int = 10,
     ) -> dict:
         """Совместимость со старым API (блок 6)."""

@@ -48,7 +48,6 @@ class CreateStates(StatesGroup):
 # УТИЛИТЫ
 # ============================================================
 async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
-    """task_id из state или из БД (последняя активная задача)."""
     data = await state.get_data()
     task_id = data.get("task_id")
 
@@ -76,7 +75,6 @@ async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
 
 
 async def _get_selected_listing(user_id: int) -> dict | None:
-    """Последний выбранный листинг пользователя."""
     return await db.fetch_one(
         """
         SELECT l.id, l.title, l.body, l.item_id, l.approach
@@ -330,7 +328,7 @@ async def _run_generation(
 
     result = None
 
-    # --- Vision, если есть фото ---
+    # --- Vision ---
     if photos and bot is not None:
         try:
             logger.info(f"_run_generation: пробую Vision ({len(photos)} фото)")
@@ -341,14 +339,14 @@ async def _run_generation(
                 system_prompt=SYSTEM_PROMPT_VISION,
                 user_prompt=user_prompt,
                 temperature=0.6,
-                max_tokens=2500,
+                max_tokens=3500,
             )
             logger.info("_run_generation: Vision успешен")
         except Exception as e:
             logger.warning(f"_run_generation: Vision упал, fallback на текст: {e}")
             result = None
 
-    # --- Fallback: только текст ---
+    # --- Fallback: текст ---
     if result is None:
         try:
             logger.info("_run_generation: текстовый режим")
@@ -360,7 +358,7 @@ async def _run_generation(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.6,
-                max_tokens=2500,
+                max_tokens=3000,
             )
         except Exception as e:
             logger.exception(f"Ошибка генерации: {e}")
@@ -554,7 +552,7 @@ async def regenerate(
         task_id = task["id"]
 
     await state.update_data(task_id=task_id)
-    await state.setState(CreateStates.choosing)
+    await state.set_state(CreateStates.choosing)
 
     await callback.answer("Генерирую заново…")
 
