@@ -68,6 +68,7 @@ class CB:
     IMPROVE_MATERIAL_LINK = "improve:link"
     IMPROVE_MATERIAL_SCREEN = "improve:screenshot"
     IMPROVE_MATERIAL_STATS = "improve:stats"
+    IMPROVE_READY = "improve:ready"
 
     IMPROVE_PROBLEM_LOW_VIEWS = "improve:problem:low_views"
     IMPROVE_PROBLEM_NO_FAVORITES = "improve:problem:no_favorites"
@@ -313,16 +314,19 @@ def listing_after_edit() -> InlineKeyboardMarkup:
 # УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ (блок 4)
 # ============================================================
 def improve_materials() -> InlineKeyboardMarkup:
+    """Клавиатура сбора материалов для улучшения объявления."""
     builder = InlineKeyboardBuilder()
-    builder.row(btn("📝 Текст", CB.IMPROVE_MATERIAL_TEXT))
-    builder.row(btn("🔗 Ссылку", CB.IMPROVE_MATERIAL_LINK))
-    builder.row(btn("📸 Скриншоты", CB.IMPROVE_MATERIAL_SCREEN))
-    builder.row(btn("📊 Статистику", CB.IMPROVE_MATERIAL_STATS))
+    builder.row(btn("📝 Добавить текст", CB.IMPROVE_MATERIAL_TEXT))
+    builder.row(btn("🔗 Добавить ссылку", CB.IMPROVE_MATERIAL_LINK))
+    builder.row(btn("📸 Добавить скриншоты", CB.IMPROVE_MATERIAL_SCREEN))
+    builder.row(btn("📊 Добавить статистику", CB.IMPROVE_MATERIAL_STATS))
+    builder.row(btn("✅ Материалов достаточно", CB.IMPROVE_READY))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def improve_problems() -> InlineKeyboardMarkup:
+    """Выбор проблемы для анализа."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("👁 Мало просмотров", CB.IMPROVE_PROBLEM_LOW_VIEWS))
     builder.row(btn("⭐ Мало избранного", CB.IMPROVE_PROBLEM_NO_FAVORITES))
