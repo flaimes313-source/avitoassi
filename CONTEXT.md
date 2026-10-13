@@ -382,3 +382,202 @@ text
 - [ ] Блок 13 ТЗ: Приватность (удаление данных)
 - [ ] Поддержка в режиме чата
 - [ ] Рассылки
+- [x] **Блок 7 ТЗ: Стратегия продвижения** (полностью)
+  - Приём данных: заголовок, текст, цена, статистика (просмотры, избранное, сообщения), дни на Авито
+  - GigaChat выдаёт пошаговый план:
+    • Шаг 1 (сегодня): что сделать сейчас
+    • Шаг 2 (через 2-3 дня): что проверить
+    • Шаг 3 (если не помогло): что делать дальше
+  - Логика: сначала бесплатные методы, платное — только если обосновано
+  - Учитывает правила Авито: не обещает топ, не советует обход ограничений
+  - Логика доставки: для авто/недвижимости/крупногабарита — только самовывоз
+  - Отслеживание показателей и следующий шаг
+  - «⏰ Напомнить позже» — отложенная стратегия
+  - Проверено: 2587 символов, 1297 токенов, ~10 сек
+  - [ ] **Блок 8 ТЗ: Ответы покупателям** ← СЛЕДУЮЩИЙ
+- [ ] Блок 9 ТЗ: Карточки и статистика
+- [ ] Блок 10 ТЗ: Напоминания (APScheduler)
+- [ ] Блоки 11–12 ТЗ: Тарифы и оплата (ЮKassa)
+- [ ] Блок 13 ТЗ: Приватность (удаление данных)
+- [ ] Поддержка в режиме чата
+- [ ] Рассылки
+text
+
+avito-assistant/
+│
+├── 📄 CONTEXT.md                     # файл-память, обновляется после каждого блока
+├── 📄 bothost.json                   # конфиг BotHost (start_command, порт 3000)
+├── 📄 requirements.txt               # зависимости
+├── 📄 .env                           # секреты (не в git)
+├── 📄 .env.example                   # шаблон секретов
+├── 📄 .gitignore                     # игнор: .env, venv, __pycache__
+│
+├── 📁 migrations/
+│   └── 📄 init.sql                   # 15 таблиц + триггеры + индексы
+│
+└── 📁 app/
+    │
+    ├── 📄 __init__.py
+    ├── 📄 main.py                    # точка входа: FastAPI + aiogram + uvicorn.run(app)
+    ├── 📄 config.py                  # Pydantic Settings — все env-переменные
+    ├── 📄 database.py                # пул psycopg + ленивая инициализация + apply_schema
+    │
+    ├── 📁 middlewares/
+    │   ├── 📄 __init__.py
+    │   ├── 📄 db.py                  # DbSessionMiddleware: db + user в контекст
+    │   ├── 📄 subscription.py        # SubscriptionMiddleware: PRO + whitelist автоповышение
+    │   ├── 📄 task_context.py        # TaskContextMiddleware: заглушка
+    │   └── 📄 throttling.py          # ThrottlingMiddleware: заглушка
+    │
+    ├── 📁 handlers/                  # 13 роутеров
+    │   ├── 📄 __init__.py
+    │   ├── 📄 start.py               # ✅ /start, онбординг, меню, /help
+    │   ├── 📄 admin.py               # ✅ /admin, whitelist, статистика
+    │   ├── 📄 create_listing.py      # ✅ блок 3 — создание объявления (Vision + текст)
+    │   ├── 📄 improve_listing.py     # ✅ блок 4 — улучшение
+    │   ├── 📄 competitors.py         # ✅ блок 5 — анализ конкурентов
+    │   ├── 📄 photos.py              # ✅ блок 6 — помощь с фото (Vision)
+    │   ├── 📄 strategy.py            # ✅ блок 7 — стратегия продвижения
+    │   ├── 📄 buyer_replies.py       # ⏳ блок 8 — СЛЕДУЮЩИЙ
+    │   ├── 📄 items_history.py       # ⏳ блок 9
+    │   ├── 📄 reminders.py           # ⏳ блок 10
+    │   ├── 📄 subscription.py        # ⏳ блоки 11–12
+    │   ├── 📄 settings.py            # ⏳ блок 13
+    │   └── 📄 support.py             # ⏳ тикеты
+    │
+    ├── 📁 services/
+    │   ├── 📄 __init__.py
+    │   ├── 📄 gigachat_service.py    # текстовый GigaChat + JSON + recovery
+    │   ├── 📄 gigachat_vision.py     # Vision: describe_photos + analyze_with_photos_json
+    │   ├── 📄 yandex_gpt.py          # fallback YandexGPT
+    │   ├── 📄 task_manager.py        # лимиты, задачи, списание
+    │   ├── 📄 whitelist.py           # whitelist_service
+    │   ├── 📄 usage_logger.py        # запись расхода токенов в БД
+    │   ├── 📄 scheduler.py           # APScheduler (заглушка)
+    │   └── 📄 yookassa_service.py    # оплата (заглушка)
+    │
+    ├── 📁 prompts/                   # системные промпты
+    │   ├── 📄 __init__.py
+    │   ├── 📄 system.py              # общие промпты (авитолог, конкуренты, ответы, стратегия)
+    │   ├── 📄 create_listing.py      # ✅ блок 3 (SYSTEM_PROMPT + SYSTEM_PROMPT_DESCRIBE_PHOTO)
+    │   ├── 📄 improve_listing.py     # ✅ блок 4
+    │   ├── 📄 competitors.py         # ✅ блок 5
+    │   ├── 📄 photos.py              # ✅ блок 6
+    │   ├── 📄 strategy.py            # ✅ блок 7
+    │   └── 📄 buyer_replies.py       # ⏳ блок 8 — создать
+    │
+    └── 📁 utils/
+        ├── 📄 __init__.py
+        ├── 📄 keyboards.py           # все клавиатуры + CB + MENU
+        └── 📄 formatters.py          # (опционально, пока пусто)
+
+Назначение каждого файла
+Инфраструктура (корень)
+Файл	Что делает
+CONTEXT.md	Память проекта. Обновляется после каждого блока. Содержит всё: что сделано, что в работе, проблемы, решения, правила
+bothost.json	Конфиг BotHost. start_command, main: app.main:app, python_version: 3.11
+requirements.txt	Все зависимости (aiogram, psycopg, gigachat, yookassa и т.д.)
+.env	Секреты — TG_TOKEN, DATABASE_URL, GIGACHAT_CREDENTIALS, YOOKASSA_*
+Миграции
+Файл	Что делает
+migrations/init.sql	Создаёт 15 таблиц: users, items, tasks, task_messages, listings, item_photos, competitors, stats_entries, reminders, payments, support_tickets, support_messages, broadcasts, audit_log, gigachat_usage, whitelist. Плюс индексы и триггеры updated_at
+Ядро (app/)
+Файл	Что делает
+main.py	FastAPI + aiogram. Регистрирует 13 роутеров и 4 middleware. /webhook для Telegram, /yookassa/webhook для оплаты, /health для BotHost. Запуск uvicorn с объектом app (не строкой!)
+config.py	Pydantic Settings. Читает .env. Валидирует обязательные переменные. Один глобальный settings
+database.py	Пул psycopg_pool с ленивой инициализацией. Хелперы: fetch_one, fetch_all, fetch_val, execute, execute_returning. Применяет init.sql при первом запросе
+Middlewares
+Файл	Что делает
+db.py	Кладёт db и user в data для всех хендлеров
+subscription.py	Автопонижение PRO при истечении. Автоповышение для whitelist. Флаги is_pro, is_admin, is_whitelisted
+task_context.py	Заглушка (в будущем — активная задача)
+throttling.py	Заглушка (в будущем — антиспам)
+Handlers (роутеры)
+Файл	Статус	Что делает
+start.py	✅	/start, онбординг (приватность + таймзона), главное меню, /help, возврат в меню
+admin.py	✅	/admin, whitelist (добавить/удалить/список), статистика (пользователи, задачи, расход токенов)
+create_listing.py	✅	Блок 3. Двухшаговая генерация: Vision описывает фото → текст генерирует 3 варианта. Редактирование, перегенерация, отмена
+improve_listing.py	✅	Блок 4. Сбор материалов (текст, ссылка, скриншоты, статистика), выбор проблемы, анализ
+competitors.py	✅	Блок 5. От 1 до 5 конкурентов, Vision читает скриншоты, сравнение
+photos.py	✅	Блок 6. Vision анализирует фото, выбор главного, советы по ракурсам
+strategy.py	✅	Блок 7. Сбор данных, GigaChat выдаёт пошаговый план
+buyer_replies.py	⏳	Блок 8. Ответы на сообщения покупателей
+items_history.py	⏳	Блок 9. Карточки товаров, статистика, история
+reminders.py	⏳	Блок 10. Напоминания 1/3/7 дней
+subscription.py	⏳	Блоки 11–12. Тарифы и оплата ЮKassa
+settings.py	⏳	Блок 13. Часовой пояс, удаление данных, поддержка
+support.py	⏳	Тикеты поддержки (админ отвечает в режиме чата)
+Services
+Файл	Что делает
+gigachat_service.py	Текстовый GigaChat. generate и generate_json. Fallback на YandexGPT. Восстановление обрезанного JSON (_try_recover_variants, _try_recover_any_json). Логирует usage
+gigachat_vision.py	Vision-режим. describe_photos (описание фото текстом), analyze_with_photos_json (JSON-ответ). Загрузка фото в GigaChat, удаление после анализа. Логирует usage
+yandex_gpt.py	Fallback на YandexGPT, если GigaChat недоступен
+task_manager.py	Лимиты Free/PRO/whitelist. check_limit, create_task, complete_task, log_message, get_limit_status
+whitelist.py	is_whitelisted, add, remove, list_all. При удалении — понижение до FREE
+usage_logger.py	Запись в gigachat_usage: user_id, task_id, call_type, токены, success, meta
+scheduler.py	APScheduler (заглушка, будет в блоке 10)
+yookassa_service.py	ЮKassa (заглушка, будет в блоках 11–12)
+Prompts
+Файл	Что делает
+system.py	Общие промпты (не используется, оставлен на будущее)
+create_listing.py	SYSTEM_PROMPT (текст), SYSTEM_PROMPT_DESCRIBE_PHOTO (Vision describe), build_user_prompt, DESCRIBE_USER_PROMPT
+improve_listing.py	SYSTEM_PROMPT, PROBLEM_LABELS, build_user_prompt
+competitors.py	SYSTEM_PROMPT, build_user_prompt
+photos.py	SYSTEM_PROMPT, build_user_prompt
+strategy.py	SYSTEM_PROMPT, build_user_prompt
+buyer_replies.py	⏳ блок 8
+Utils
+Файл	Что делает
+keyboards.py	Все клавиатуры. Класс CB — реестр callback_data. Класс MENU — тексты кнопок главного меню (короткие). Inline и Reply клавиатуры
+Поток данных
+text
+
+Telegram → BotHost (порт 3000)
+    ↓
+FastAPI /webhook (secret check)
+    ↓
+Update.model_validate
+    ↓
+dp.feed_webhook_update
+    ↓
+┌─────────────────────────────────┐
+│ Middlewares (outer):            │
+│ 1. Throttling                   │
+│ 2. DbSession (user + db)        │
+│ 3. Subscription (PRO/whitelist) │
+│ 4. TaskContext                  │
+└─────────────────────────────────┘
+    ↓
+Router (13 штук по порядку)
+    ↓
+Handler → GigaChat/Vision → БД → ответ пользователю
+    ↓
+usage_logger → gigachat_usage
+
+Что в работе (по блокам ТЗ)
+Блок	Статус	Файлы
+3 — Создать объявление	✅	handlers/create_listing.py, prompts/create_listing.py
+4 — Улучшить объявление	✅	handlers/improve_listing.py, prompts/improve_listing.py
+5 — Анализ конкурентов	✅	handlers/competitors.py, prompts/competitors.py
+6 — Помощь с фото	✅	handlers/photos.py, prompts/photos.py
+7 — Стратегия	✅	handlers/strategy.py, prompts/strategy.py
+8 — Ответы покупателям	⏳	handlers/buyer_replies.py, prompts/buyer_replies.py — СЛЕДУЮЩИЕ
+9 — Карточки и статистика	⏳	handlers/items_history.py
+10 — Напоминания	⏳	handlers/reminders.py, services/scheduler.py
+11–12 — Тарифы и оплата	⏳	handlers/subscription.py, services/yookassa_service.py
+13 — Приватность	⏳	handlers/settings.py
+Поддержка	⏳	handlers/support.py
+Рассылки	⏳	в handlers/admin.py
+Итого
+
+    Роутеров: 13 (7 готовы, 6 заглушки)
+
+    Таблиц в БД: 16 (whitelist + gigachat_usage добавлены)
+
+    Middlewares: 4 (2 работают, 2 заглушки)
+
+    Сервисов: 8 (5 работают, 3 заглушки)
+
+    Промптов: 5 (готовы), 1 в работе (блок 8)
+
+Следующий шаг — блок 8 «Ответы покупателям»: handlers/buyer_replies.py + prompts/buyer_replies.py.
