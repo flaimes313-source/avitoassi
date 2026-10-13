@@ -342,7 +342,7 @@ async def _run_generation(
                 system_prompt=SYSTEM_PROMPT_VISION,
                 user_prompt=user_prompt,
                 temperature=0.6,
-                max_tokens=5000,
+                max_tokens=8000,
                 user_id=user_id,
                 task_id=task_id,
             )
@@ -363,7 +363,7 @@ async def _run_generation(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.6,
-                max_tokens=4000,
+                max_tokens=6000,
                 user_id=user_id,
                 task_id=task_id,
             )
