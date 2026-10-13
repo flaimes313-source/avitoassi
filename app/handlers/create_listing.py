@@ -132,7 +132,7 @@ async def start_create(
             summary_lines.append(f"• Текст: {preview}")
 
         await state.set_state(CreateStates.collecting)
-        await state.update_data(task_id=task["id"])
+        await state.update_data(task_id=task["id"], user_id=user["id"])
         await message.answer(
             "\n".join(summary_lines) + "\n\nПродолжаем или начнём заново?",
             reply_markup=create_listing_ready(),
@@ -144,7 +144,7 @@ async def start_create(
         task_type="create_listing",
         collected_data={"photos": [], "extra": ""},
     )
-    await state.update_data(task_id=task["id"])
+    await state.update_data(task_id=task["id"], user_id=user["id"])
     await state.set_state(CreateStates.collecting)
 
     await message.answer(
@@ -290,7 +290,7 @@ async def materials_done(
         await state.clear()
         return
 
-    await state.update_data(task_id=task_id)
+    await state.update_data(task_id=task_id, user_id=user["id"])
     await state.set_state(CreateStates.choosing)
 
     await callback.answer("Запускаю генерацию…")
@@ -308,6 +308,9 @@ async def _run_generation(
     bot=None,
 ) -> None:
     logger.info(f"_run_generation: task_id={task_id}, bot={'есть' if bot else 'нет'}")
+
+    data = await state.get_data()
+    user_id = data.get("user_id")
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
     if not task:
@@ -339,7 +342,9 @@ async def _run_generation(
                 system_prompt=SYSTEM_PROMPT_VISION,
                 user_prompt=user_prompt,
                 temperature=0.6,
-                max_tokens=3500,
+                max_tokens=5000,
+                user_id=user_id,
+                task_id=task_id,
             )
             logger.info("_run_generation: Vision успешен")
         except Exception as e:
@@ -358,7 +363,9 @@ async def _run_generation(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.6,
-                max_tokens=3000,
+                max_tokens=4000,
+                user_id=user_id,
+                task_id=task_id,
             )
         except Exception as e:
             logger.exception(f"Ошибка генерации: {e}")
@@ -472,6 +479,7 @@ async def pick_variant(
         selected_variant=variant,
         selected_variant_index=idx,
         task_id=task_id,
+        user_id=user["id"],
     )
     await state.set_state(CreateStates.editing)
 
@@ -551,7 +559,7 @@ async def regenerate(
     else:
         task_id = task["id"]
 
-    await state.update_data(task_id=task_id)
+    await state.update_data(task_id=task_id, user_id=user["id"])
     await state.set_state(CreateStates.choosing)
 
     await callback.answer("Генерирую заново…")

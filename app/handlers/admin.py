@@ -73,7 +73,7 @@ async def show_admin_panel(callback: CallbackQuery) -> None:
 # ============================================================
 # БЕЛЫЙ СПИСОК
 # ============================================================
-@router.callback_query(F.data == "admin:whitelist")
+@router.callback_query(F.data == CB.ADMIN_WHITELIST)
 async def show_whitelist(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -227,9 +227,7 @@ async def admin_stats(callback: CallbackQuery) -> None:
         return
 
     total_users = await db.fetch_val("SELECT COUNT(*) FROM users")
-    pro_users = await db.fetch_val(
-        "SELECT COUNT(*) FROM users WHERE tariff = 'pro'"
-    )
+    pro_users = await db.fetch_val("SELECT COUNT(*) FROM users WHERE tariff = 'pro'")
     wl_count = await db.fetch_val(
         "SELECT COUNT(*) FROM whitelist WHERE is_active = TRUE"
     )
@@ -239,14 +237,67 @@ async def admin_stats(callback: CallbackQuery) -> None:
         "SELECT COUNT(*) FROM tasks WHERE status = 'done'"
     )
 
-    await callback.message.edit_text(
+    # Расход токенов
+    tokens_today = await db.fetch_val(
+        """
+        SELECT COALESCE(SUM(total_tokens), 0) FROM gigachat_usage
+        WHERE created_at >= CURRENT_DATE AND success = TRUE
+        """
+    ) or 0
+    tokens_month = await db.fetch_val(
+        """
+        SELECT COALESCE(SUM(total_tokens), 0) FROM gigachat_usage
+        WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE) AND success = TRUE
+        """
+    ) or 0
+    calls_today = await db.fetch_val(
+        """
+        SELECT COUNT(*) FROM gigachat_usage
+        WHERE created_at >= CURRENT_DATE
+        """
+    ) or 0
+    calls_month = await db.fetch_val(
+        """
+        SELECT COUNT(*) FROM gigachat_usage
+        WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE)
+        """
+    ) or 0
+
+    # Топ-3 пользователя по расходу за месяц
+    top_users = await db.fetch_all(
+        """
+        SELECT u.telegram_id, SUM(g.total_tokens) AS total
+        FROM gigachat_usage g
+        JOIN users u ON u.id = g.user_id
+        WHERE g.created_at >= DATE_TRUNC('month', CURRENT_DATE)
+          AND g.success = TRUE
+        GROUP BY u.telegram_id
+        ORDER BY total DESC
+        LIMIT 3
+        """
+    )
+
+    top_lines = []
+    for row in top_users:
+        top_lines.append(
+            f"  • <code>{row['telegram_id']}</code>: {int(row['total']):,} токенов"
+        )
+
+    text = (
         f"📊 <b>Статистика</b>\n\n"
         f"👥 Пользователей: {total_users}\n"
         f"⭐ PRO (платных): {pro_users}\n"
         f"🎁 Whitelist: {wl_count}\n\n"
         f"📦 Товаров: {total_items}\n"
         f"🎯 Задач всего: {total_tasks}\n"
-        f"✅ Успешных: {done_tasks}",
-        reply_markup=admin_panel(),
+        f"✅ Успешных: {done_tasks}\n\n"
+        f"🔢 <b>Расход GigaChat</b>\n"
+        f"Сегодня: {int(tokens_today):,} токенов ({calls_today} вызовов)\n"
+        f"За месяц: {int(tokens_month):,} токенов ({calls_month} вызовов)\n"
     )
+
+    if top_lines:
+        text += "\n🏆 <b>Топ-3 по расходу (месяц):</b>\n" + "\n".join(top_lines)
+
+    await callback.message.edit_text(text, reply_markup=admin_panel())
     await callback.answer()

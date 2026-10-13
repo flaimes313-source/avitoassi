@@ -279,3 +279,11 @@ text
 - Vision-методы: `generate_with_photos` (свободный текст), `analyze_with_photos_json` (JSON)
 - Всегда fallback на текст, если Vision падает
 - Файлы в GigaChat удаляются сразу после анализа
+- [x] Логирование расхода токенов GigaChat
+  - Таблица `gigachat_usage` (user_id, task_id, call_type, tokens, success)
+  - `usage_logger` — центральная точка записи
+  - Логирование из текста и Vision после каждого вызова
+  - Админ-статистика: расход за день/месяц, топ-3 пользователя
+  - `max_tokens`: 5000 (Vision) / 4000 (текст)
+- Расход токенов логируется в `gigachat_usage`
+- Видим через `/admin` → «Статистика»

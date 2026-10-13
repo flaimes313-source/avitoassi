@@ -1,15 +1,7 @@
 """
 Сервис анализа изображений через GigaChat Vision.
 
-Возможности:
-- Скачивание фото из Telegram
-- Загрузка в GigaChat через upload_file
-- Анализ изображений с текстовым промптом
-- Генерация с фото (свободный текст)
-- Восстановление обрезанного JSON
-- Удаление файлов из GigaChat после анализа
-
-Модель: GigaChat-2-Pro (поддерживает Vision).
+Логирует расход токенов в gigachat_usage.
 """
 
 from __future__ import annotations
@@ -28,19 +20,9 @@ from loguru import logger
 from app.config import settings
 
 
-# ============================================================
-# ВОССТАНОВЛЕНИЕ ОБРЕЗАННОГО JSON
-# ============================================================
 def _try_recover_json(text: str) -> dict | None:
-    """
-    Пытается восстановить обрезанный JSON.
-
-    GigaChat при превышении max_tokens обрезает ответ посередине.
-    Для ответов с массивом variants — ищем все полные объекты
-    вариантов и собираем из них валидный JSON.
-    """
+    """Восстанавливает обрезанный JSON."""
     try:
-        # Ищем все полные объекты вида {"approach": "...", "title": "...", "body": "..."}
         pattern = re.compile(
             r'\{\s*"approach"\s*:\s*"[^"]*"\s*,\s*'
             r'"title"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*'
@@ -48,7 +30,6 @@ def _try_recover_json(text: str) -> dict | None:
             re.DOTALL,
         )
         matches = pattern.findall(text)
-
         if not matches:
             return None
 
@@ -60,12 +41,10 @@ def _try_recover_json(text: str) -> dict | None:
                 continue
 
         if variants:
-            logger.info(f"Recovery: удалось восстановить {len(variants)} вариантов")
+            logger.info(f"Recovery: восстановлено {len(variants)} вариантов")
             return {"variants": variants}
-
     except Exception as e:
         logger.debug(f"Recovery не удался: {e}")
-
     return None
 
 
@@ -76,7 +55,6 @@ class GigaChatVisionService:
         self._client: GigaChat | None = None
 
     def _get_client(self) -> GigaChat:
-        """Ленивая инициализация клиента."""
         if self._client is None:
             scope = (settings.gigachat_scope or "").strip() or "GIGACHAT_API_PERS"
 
@@ -99,14 +77,12 @@ class GigaChatVisionService:
                 f"GigaChat Vision клиент инициализирован: "
                 f"model={settings.gigachat_model}, scope={scope}"
             )
-
         return self._client
 
     # --------------------------------------------------------
     # СИНХРОННЫЕ ОПЕРАЦИИ
     # --------------------------------------------------------
     def _sync_upload(self, file_bytes: bytes, filename: str = "photo.jpg") -> str:
-        """Загружает картинку в GigaChat, возвращает file_id."""
         client = self._get_client()
         file_obj = io.BytesIO(file_bytes)
         file_obj.name = filename
@@ -116,7 +92,6 @@ class GigaChatVisionService:
         return uploaded.id_
 
     def _sync_delete(self, file_id: str) -> None:
-        """Удаляет файл из GigaChat."""
         try:
             client = self._get_client()
             client.delete_file(file_id)
@@ -131,8 +106,8 @@ class GigaChatVisionService:
         file_ids: list[str],
         temperature: float,
         max_tokens: int,
-    ) -> str:
-        """Отправляет чат с прикреплёнными картинками."""
+    ) -> tuple[str, Any]:
+        """Возвращает (текст, usage)."""
         client = self._get_client()
 
         messages = [
@@ -152,28 +127,22 @@ class GigaChatVisionService:
         )
 
         response = client.chat(chat)
-        return response.choices[0].message.content
+        text = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        return text, usage
 
     # --------------------------------------------------------
     # АСИНХРОННЫЕ ОБЁРТКИ
     # --------------------------------------------------------
     async def _download_tg_photo(self, bot: Bot, file_id: str) -> bytes:
-        """Скачивает фото из Telegram по file_id."""
         tg_file = await bot.get_file(file_id)
         buf = io.BytesIO()
         await bot.download_file(tg_file.file_path, buf)
         return buf.getvalue()
 
     async def _upload_photos(
-        self,
-        bot: Bot,
-        photos: list[dict],
-        max_photos: int = 10,
+        self, bot: Bot, photos: list[dict], max_photos: int = 10,
     ) -> list[str]:
-        """
-        Загружает фото из Telegram в GigaChat.
-        Возвращает список giga_file_id.
-        """
         photos = photos[:max_photos]
         uploaded_ids: list[str] = []
 
@@ -181,7 +150,6 @@ class GigaChatVisionService:
             tg_file_id = photo.get("file_id")
             if not tg_file_id:
                 continue
-
             try:
                 file_bytes = await self._download_tg_photo(bot, tg_file_id)
                 giga_id = await asyncio.to_thread(
@@ -194,9 +162,63 @@ class GigaChatVisionService:
         return uploaded_ids
 
     async def _cleanup(self, file_ids: list[str]) -> None:
-        """Удаляет файлы из GigaChat."""
         for giga_id in file_ids:
             await asyncio.to_thread(self._sync_delete, giga_id)
+
+    # --------------------------------------------------------
+    # ЛОГИРОВАНИЕ USAGE
+    # --------------------------------------------------------
+    async def _log_usage(
+        self,
+        usage: Any,
+        user_id: int | None,
+        task_id: int | None,
+        call_type: str,
+        temperature: float,
+        max_tokens: int,
+        prompt_len: int,
+        completion_len: int,
+        photos_count: int,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        from app.services.usage_logger import usage_logger
+
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+
+        if usage is not None:
+            prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+            total_tokens = getattr(usage, "total_tokens", 0) or 0
+
+        if total_tokens == 0:
+            prompt_tokens = prompt_len // 4
+            completion_tokens = completion_len // 4
+            total_tokens = prompt_tokens + completion_tokens
+
+        meta = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "prompt_len": prompt_len,
+            "completion_len": completion_len,
+            "photos_count": photos_count,
+        }
+        if error:
+            meta["error"] = error[:300]
+
+        await usage_logger.log(
+            user_id=user_id,
+            task_id=task_id,
+            call_type=call_type,
+            model=settings.gigachat_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            success=success,
+            meta=meta,
+        )
 
     # --------------------------------------------------------
     # ПУБЛИЧНЫЕ МЕТОДЫ
@@ -208,8 +230,10 @@ class GigaChatVisionService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.6,
-        max_tokens: int = 3500,
+        max_tokens: int = 5000,
         max_photos: int = 10,
+        user_id: int | None = None,
+        task_id: int | None = None,
     ) -> str:
         """Генерация с фото (свободный текст)."""
         if not photos:
@@ -222,7 +246,7 @@ class GigaChatVisionService:
         logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
 
         try:
-            result = await asyncio.to_thread(
+            result, usage = await asyncio.to_thread(
                 self._sync_chat_with_attachments,
                 system_prompt,
                 user_prompt,
@@ -230,7 +254,36 @@ class GigaChatVisionService:
                 temperature,
                 max_tokens,
             )
+
+            await self._log_usage(
+                usage=usage,
+                user_id=user_id,
+                task_id=task_id,
+                call_type="vision",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                prompt_len=len(system_prompt) + len(user_prompt),
+                completion_len=len(result),
+                photos_count=len(uploaded_ids),
+                success=True,
+            )
             return result
+
+        except Exception as e:
+            await self._log_usage(
+                usage=None,
+                user_id=user_id,
+                task_id=task_id,
+                call_type="vision",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                prompt_len=len(system_prompt) + len(user_prompt),
+                completion_len=0,
+                photos_count=len(uploaded_ids),
+                success=False,
+                error=str(e),
+            )
+            raise
         finally:
             await self._cleanup(uploaded_ids)
 
@@ -241,8 +294,10 @@ class GigaChatVisionService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.4,
-        max_tokens: int = 3500,
+        max_tokens: int = 5000,
         max_photos: int = 10,
+        user_id: int | None = None,
+        task_id: int | None = None,
     ) -> dict:
         """Анализ с фото, возвращает распарсенный JSON."""
         if not photos:
@@ -255,7 +310,7 @@ class GigaChatVisionService:
         logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
 
         try:
-            result = await asyncio.to_thread(
+            result, usage = await asyncio.to_thread(
                 self._sync_chat_with_attachments,
                 system_prompt,
                 user_prompt,
@@ -264,7 +319,6 @@ class GigaChatVisionService:
                 max_tokens,
             )
 
-            # Чистим markdown-обёртки
             cleaned = result.strip()
             if cleaned.startswith("```json"):
                 cleaned = cleaned[7:]
@@ -275,21 +329,50 @@ class GigaChatVisionService:
             cleaned = cleaned.strip()
 
             try:
-                return json.loads(cleaned)
+                parsed = json.loads(cleaned)
+                parse_error = None
             except json.JSONDecodeError as e:
                 logger.error(f"Vision: не удалось распарсить JSON: {e}")
                 logger.debug(f"Сырой ответ: {result[:500]}")
 
                 recovered = _try_recover_json(cleaned)
-                if recovered is not None:
-                    logger.warning("Vision: JSON восстановлен после обрезки")
-                    return recovered
+                if recovered is None:
+                    raise RuntimeError(f"GigaChat вернул невалидный JSON: {e}")
+                logger.warning("Vision: JSON восстановлен после обрезки")
+                parsed = recovered
 
-                raise RuntimeError(f"GigaChat вернул невалидный JSON: {e}")
+            await self._log_usage(
+                usage=usage,
+                user_id=user_id,
+                task_id=task_id,
+                call_type="vision_json",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                prompt_len=len(system_prompt) + len(user_prompt),
+                completion_len=len(result),
+                photos_count=len(uploaded_ids),
+                success=True,
+            )
+            return parsed
+
+        except Exception as e:
+            await self._log_usage(
+                usage=None,
+                user_id=user_id,
+                task_id=task_id,
+                call_type="vision_json",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                prompt_len=len(system_prompt) + len(user_prompt),
+                completion_len=0,
+                photos_count=len(uploaded_ids),
+                success=False,
+                error=str(e),
+            )
+            raise
         finally:
             await self._cleanup(uploaded_ids)
 
-    # Алиас для обратной совместимости
     async def analyze_photos(
         self,
         bot: Bot,
@@ -297,10 +380,12 @@ class GigaChatVisionService:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.4,
-        max_tokens: int = 3500,
+        max_tokens: int = 5000,
         max_photos: int = 10,
+        user_id: int | None = None,
+        task_id: int | None = None,
     ) -> dict:
-        """Совместимость со старым API (блок 6)."""
+        """Совместимость со старым API."""
         return await self.analyze_with_photos_json(
             bot=bot,
             photos=photos,
@@ -309,10 +394,9 @@ class GigaChatVisionService:
             temperature=temperature,
             max_tokens=max_tokens,
             max_photos=max_photos,
+            user_id=user_id,
+            task_id=task_id,
         )
 
 
-# ============================================================
-# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР
-# ============================================================
 gigachat_vision_service = GigaChatVisionService()

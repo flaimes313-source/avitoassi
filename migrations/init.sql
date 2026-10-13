@@ -456,3 +456,38 @@ DROP TRIGGER IF EXISTS trg_whitelist_updated_at ON whitelist;
 CREATE TRIGGER trg_whitelist_updated_at
     BEFORE UPDATE ON whitelist
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    -- ============================================================
+-- РАСХОД ТОКЕНОВ GIGACHAT
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gigachat_usage (
+    id                  BIGSERIAL PRIMARY KEY,
+    user_id             BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    task_id             BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+
+    -- Тип вызова: 'text' | 'vision' | 'json'
+    call_type           TEXT NOT NULL,
+
+    -- Модель
+    model               TEXT NOT NULL,
+
+    -- Токены
+    prompt_tokens       INTEGER NOT NULL DEFAULT 0,
+    completion_tokens   INTEGER NOT NULL DEFAULT 0,
+    total_tokens        INTEGER NOT NULL DEFAULT 0,
+
+    -- Признак успеха
+    success             BOOLEAN NOT NULL DEFAULT TRUE,
+
+    -- Метаданные (сценарий, температура и т.п.)
+    meta                JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_user_date
+    ON gigachat_usage(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_date
+    ON gigachat_usage(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_task
+    ON gigachat_usage(task_id)
+    WHERE task_id IS NOT NULL;
