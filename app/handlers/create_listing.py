@@ -1,5 +1,7 @@
 ﻿"""
 Сценарий «Создать объявление» (блок 3 ТЗ).
+Vision: если есть фото — GigaChat их видит.
+Fallback: если Vision падает — работает только текст.
 """
 
 from __future__ import annotations
@@ -11,8 +13,14 @@ from aiogram.types import CallbackQuery, Message
 from loguru import logger
 
 from app.database import db, to_jsonb
-from app.prompts.create_listing import SYSTEM_PROMPT, build_user_prompt
+from app.prompts.create_listing import (
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_VISION,
+    build_user_prompt,
+    build_user_prompt_with_photos,
+)
 from app.services.gigachat_service import gigachat_service
+from app.services.gigachat_vision import gigachat_vision_service
 from app.services.task_manager import task_manager
 from app.utils.keyboards import (
     CB,
@@ -144,7 +152,7 @@ async def start_create(
     await message.answer(
         "📝 <b>Создаём объявление</b>\n\n"
         "Пришли материалы о товаре в любом порядке:\n"
-        "• 📸 Фото (можно несколько)\n"
+        "• 📸 Фото (можно несколько) — я их увижу\n"
         "• ✏️ Текст: что это, состояние, характеристики, цена\n\n"
         "Когда закончишь — нажми «✅ Материалов достаточно».",
         reply_markup=create_listing_start(),
@@ -274,6 +282,7 @@ async def materials_done(
     callback: CallbackQuery,
     state: FSMContext,
     user: dict,
+    bot,
 ) -> None:
     logger.info(f"materials_done: user={callback.from_user.id}")
 
@@ -291,15 +300,16 @@ async def materials_done(
         "✅ Материалы собраны.\n\n"
         "Запускаю генерацию трёх вариантов. Это займёт до 30 секунд…"
     )
-    await _run_generation(callback.message, state, task_id)
+    await _run_generation(callback.message, state, task_id, bot=bot)
 
 
 async def _run_generation(
     message: Message,
     state: FSMContext,
     task_id: int,
+    bot=None,
 ) -> None:
-    logger.info(f"_run_generation: task_id={task_id}")
+    logger.info(f"_run_generation: task_id={task_id}, bot={'есть' if bot else 'нет'}")
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
     if not task:
@@ -318,28 +328,48 @@ async def _run_generation(
         )
         return
 
-    prompt_data = {
-        "extra": text,
-        "photos_count": len(photos),
-    }
-    user_prompt = build_user_prompt(prompt_data)
+    result = None
 
-    try:
-        result = await gigachat_service.generate_json(
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            temperature=0.6,
-            max_tokens=2500,
-        )
-        logger.info(f"_run_generation: GigaChat ответил, ключи={list(result.keys())}")
-    except Exception as e:
-        logger.exception(f"Ошибка генерации: {e}")
-        await task_manager.complete_task(task_id, status="failed", technical_failure=True)
-        await message.answer(
-            "❌ Не удалось сгенерировать объявление. Попробуй позже.\nЛимит не списан.",
-            reply_markup=cancel_and_back(),
-        )
-        return
+    # --- Vision, если есть фото ---
+    if photos and bot is not None:
+        try:
+            logger.info(f"_run_generation: пробую Vision ({len(photos)} фото)")
+            user_prompt = build_user_prompt_with_photos(collected)
+            result = await gigachat_vision_service.analyze_with_photos_json(
+                bot=bot,
+                photos=photos,
+                system_prompt=SYSTEM_PROMPT_VISION,
+                user_prompt=user_prompt,
+                temperature=0.6,
+                max_tokens=2500,
+            )
+            logger.info("_run_generation: Vision успешен")
+        except Exception as e:
+            logger.warning(f"_run_generation: Vision упал, fallback на текст: {e}")
+            result = None
+
+    # --- Fallback: только текст ---
+    if result is None:
+        try:
+            logger.info("_run_generation: текстовый режим")
+            user_prompt = build_user_prompt({
+                "extra": text,
+                "photos_count": len(photos),
+            })
+            result = await gigachat_service.generate_json(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.6,
+                max_tokens=2500,
+            )
+        except Exception as e:
+            logger.exception(f"Ошибка генерации: {e}")
+            await task_manager.complete_task(task_id, status="failed", technical_failure=True)
+            await message.answer(
+                "❌ Не удалось сгенерировать объявление. Попробуй позже.\nЛимит не списан.",
+                reply_markup=cancel_and_back(),
+            )
+            return
 
     variants = result.get("variants", [])
     if not variants:
@@ -490,6 +520,7 @@ async def regenerate(
     callback: CallbackQuery,
     state: FSMContext,
     user: dict,
+    bot,
 ) -> None:
     logger.info(f"regenerate: user={callback.from_user.id}")
 
@@ -523,14 +554,13 @@ async def regenerate(
         task_id = task["id"]
 
     await state.update_data(task_id=task_id)
-    await state.set_state(CreateStates.choosing)
+    await state.setState(CreateStates.choosing)
 
     await callback.answer("Генерирую заново…")
 
-    # Исправлено: без `await` перед присваиванием
     message = callback.message
     await message.answer("🔄 Генерирую заново…")
-    await _run_generation(message, state, task_id)
+    await _run_generation(message, state, task_id, bot=bot)
 
 
 # ============================================================

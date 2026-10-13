@@ -1,8 +1,8 @@
 ﻿"""
 Сценарий «Анализ конкурентов» (блок 5 ТЗ).
 
-Пользователь присылает от 1 до 5 конкурентов (ссылки, скриншоты, текст).
-GigaChat сравнивает и выдаёт рекомендации.
+Vision: если есть скриншоты — GigaChat их читает.
+Fallback: если Vision падает — работает только текст.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from loguru import logger
 from app.database import db, to_jsonb
 from app.prompts.competitors import SYSTEM_PROMPT, build_user_prompt
 from app.services.gigachat_service import gigachat_service
+from app.services.gigachat_vision import gigachat_vision_service
 from app.services.task_manager import task_manager
 from app.utils.keyboards import (
     CB,
@@ -31,7 +32,7 @@ MAX_COMPETITORS = 5
 
 
 class CompetitorsStates(StatesGroup):
-    collecting = State()   # сбор конкурентов
+    collecting = State()
 
 
 # ============================================================
@@ -64,7 +65,6 @@ async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
 
 
 def _detect_source_type(text: str) -> str:
-    """Определяет тип источника по тексту."""
     t = text.strip()
     if t.startswith("http://") or t.startswith("https://"):
         return "link"
@@ -102,7 +102,6 @@ async def start_competitors(
         )
         return
 
-    # Продолжаем активную задачу
     if check.existing_task:
         task = check.existing_task
         collected = task.get("collected_data") or {}
@@ -116,7 +115,6 @@ async def start_competitors(
         )
         return
 
-    # Новая задача
     task = await task_manager.create_task(
         user=user,
         task_type="competitors",
@@ -128,9 +126,9 @@ async def start_competitors(
     await message.answer(
         "🔍 <b>Анализ конкурентов</b>\n\n"
         "Пришли от 1 до 5 конкурентов:\n\n"
-        "• 🔗 <b>Ссылкой</b> на объявление (я не парсю, просто учту)\n"
-        "• 📸 <b>Скриншотом</b> объявления\n"
-        "• 📝 <b>Текстом</b> — просто скопируй и вставь\n\n"
+        "• 📝 <b>Текстом</b> — самый точный вариант, скопируй объявление\n"
+        "• 📸 <b>Скриншотом</b> — я прочитаю текст с картинки\n"
+        "• 🔗 <b>Ссылкой</b> — просто учту как факт (не парсю)\n\n"
         "Когда добавишь всех — нажми «▶️ Запустить анализ».",
         reply_markup=competitors_collect(),
     )
@@ -163,7 +161,7 @@ async def on_text_competitor(
     if len(competitors) >= MAX_COMPETITORS:
         await message.answer(
             f"⚠️ Уже {MAX_COMPETITORS} конкурентов — максимум.\n\n"
-            f"Нажми «▶️ Запустить анализ» или удали лишние.",
+            f"Нажми «▶️ Запустить анализ».",
         )
         return
 
@@ -175,6 +173,7 @@ async def on_text_competitor(
             "url": message.text.strip(),
             "content": None,
             "screenshots_count": 0,
+            "screenshots": [],
         })
         preview = message.text.strip()[:80]
         await message.answer(
@@ -189,6 +188,7 @@ async def on_text_competitor(
             "url": None,
             "content": message.text.strip(),
             "screenshots_count": 0,
+            "screenshots": [],
         })
         preview = message.text.strip()[:150] + (
             "..." if len(message.text) > 150 else ""
@@ -232,7 +232,7 @@ async def on_photo_competitor(
 
     photo = message.photo[-1]
 
-    # Ищем последнего конкурента типа "screenshot" — если есть, добавляем
+    # Ищем последнего конкурента типа "screenshot" — если есть, добавляем к нему
     last_screenshot = None
     for c in reversed(competitors):
         if c.get("source_type") == "screenshot":
@@ -240,16 +240,14 @@ async def on_photo_competitor(
             break
 
     if last_screenshot is not None:
-        # Добавляем скриншот к нему
         last_screenshot["screenshots_count"] = last_screenshot.get("screenshots_count", 0) + 1
-        # Сохраняем file_id отдельно (в JSONB)
         last_screenshot.setdefault("screenshots", []).append({
             "file_id": photo.file_id,
             "file_unique_id": photo.file_unique_id,
         })
         await message.answer(
             f"📸 Скриншот добавлен к конкуренту №{len(competitors)} "
-            f"(всего скриншотов: {last_screenshot['screenshots_count']}).",
+            f"(всего: {last_screenshot['screenshots_count']}).",
             reply_markup=competitors_collect(),
         )
     else:
@@ -291,6 +289,7 @@ async def run_analysis(
     callback: CallbackQuery,
     state: FSMContext,
     user: dict,
+    bot,
 ) -> None:
     logger.info(f"run_analysis: user={callback.from_user.id}")
 
@@ -318,7 +317,7 @@ async def run_analysis(
         f"✅ Принято {len(competitors)} конкурентов.\n\n"
         f"Запускаю анализ. Это займёт до 40 секунд…"
     )
-    await _run_analysis(callback.message, state, task_id, user)
+    await _run_analysis(callback.message, state, task_id, user, bot=bot)
 
 
 # ============================================================
@@ -329,8 +328,9 @@ async def _run_analysis(
     state: FSMContext,
     task_id: int,
     user: dict,
+    bot=None,
 ) -> None:
-    logger.info(f"_run_analysis (competitors): task_id={task_id}")
+    logger.info(f"_run_analysis (competitors): task_id={task_id}, bot={'есть' if bot else 'нет'}")
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
     if not task:
@@ -340,32 +340,56 @@ async def _run_analysis(
     collected = task["collected_data"] or {}
     competitors = collected.get("competitors", [])
 
-    # Собираем промпт
+    # Собираем все скриншоты
+    all_screenshots = []
+    for comp in competitors:
+        if comp.get("source_type") == "screenshot":
+            for s in comp.get("screenshots", []):
+                all_screenshots.append({"file_id": s["file_id"]})
+
     user_prompt = build_user_prompt(competitors)
 
-    try:
-        logger.info("_run_analysis: вызов GigaChat…")
-        result = await gigachat_service.generate_json(
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            temperature=0.4,
-            max_tokens=3000,
-        )
-        logger.info(f"_run_analysis: GigaChat ответил")
-    except Exception as e:
-        logger.exception(f"Ошибка анализа: {e}")
-        await task_manager.complete_task(task_id, status="failed", technical_failure=True)
-        await message.answer(
-            "❌ Не удалось проанализировать конкурентов. Попробуй позже.\n"
-            "Лимит не списан.",
-            reply_markup=cancel_and_back(),
-        )
-        return
+    result = None
 
-    # Сохраняем результат
+    # --- Vision, если есть скриншоты ---
+    if all_screenshots and bot is not None:
+        try:
+            logger.info(f"_run_analysis: пробую Vision ({len(all_screenshots)} скриншотов)")
+            result = await gigachat_vision_service.analyze_with_photos_json(
+                bot=bot,
+                photos=all_screenshots,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.4,
+                max_tokens=3000,
+            )
+            logger.info("_run_analysis: Vision успешен")
+        except Exception as e:
+            logger.warning(f"_run_analysis: Vision упал, fallback на текст: {e}")
+            result = None
+
+    # --- Fallback: только текст ---
+    if result is None:
+        try:
+            logger.info("_run_analysis: текстовый режим")
+            result = await gigachat_service.generate_json(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.4,
+                max_tokens=3000,
+            )
+        except Exception as e:
+            logger.exception(f"Ошибка анализа: {e}")
+            await task_manager.complete_task(task_id, status="failed", technical_failure=True)
+            await message.answer(
+                "❌ Не удалось проанализировать конкурентов. Попробуй позже.\n"
+                "Лимит не списан.",
+                reply_markup=cancel_and_back(),
+            )
+            return
+
+    # Сохраняем и завершаем
     await task_manager.set_result(task_id, result)
-
-    # Завершаем задачу
     await task_manager.complete_task(task_id, status="done", result=result)
 
     # Формируем ответ

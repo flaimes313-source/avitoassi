@@ -5,6 +5,7 @@
 - Скачивание фото из Telegram
 - Загрузка в GigaChat через upload_file
 - Анализ изображений с текстовым промптом
+- Генерация с фото (свободный текст)
 - Удаление файлов из GigaChat после анализа
 
 Модель: GigaChat-2-Pro (поддерживает Vision).
@@ -40,7 +41,7 @@ class GigaChatVisionService:
                 "credentials": settings.gigachat_credentials,
                 "scope": scope,
                 "model": settings.gigachat_model,
-                "timeout": 120.0,   # Vision медленнее текста
+                "timeout": 120.0,
                 "max_retries": 2,
             }
 
@@ -59,13 +60,13 @@ class GigaChatVisionService:
         return self._client
 
     # --------------------------------------------------------
-    # СИНХРОННЫЕ ОПЕРАЦИИ (выполняются в отдельном потоке)
+    # СИНХРОННЫЕ ОПЕРАЦИИ
     # --------------------------------------------------------
     def _sync_upload(self, file_bytes: bytes, filename: str = "photo.jpg") -> str:
         """Загружает картинку в GigaChat, возвращает file_id."""
         client = self._get_client()
         file_obj = io.BytesIO(file_bytes)
-        file_obj.name = filename  # нужно для корректного определения mime
+        file_obj.name = filename
 
         uploaded = client.upload_file(file_obj)
         logger.debug(f"Файл загружен в GigaChat: {uploaded.id_}")
@@ -96,7 +97,7 @@ class GigaChatVisionService:
             Messages(
                 role=MessagesRole.USER,
                 content=user_prompt,
-                attachments=file_ids,  # список file_id
+                attachments=file_ids,
             ),
         ]
 
@@ -120,7 +121,83 @@ class GigaChatVisionService:
         await bot.download_file(tg_file.file_path, buf)
         return buf.getvalue()
 
-    async def analyze_photos(
+    async def _upload_photos(
+        self,
+        bot: Bot,
+        photos: list[dict],
+        max_photos: int = 10,
+    ) -> list[str]:
+        """
+        Загружает фото из Telegram в GigaChat.
+        Возвращает список giga_file_id.
+        Пропускает проблемные фото с логированием.
+        """
+        photos = photos[:max_photos]
+        uploaded_ids: list[str] = []
+
+        for photo in photos:
+            tg_file_id = photo.get("file_id")
+            if not tg_file_id:
+                continue
+
+            try:
+                file_bytes = await self._download_tg_photo(bot, tg_file_id)
+                giga_id = await asyncio.to_thread(
+                    self._sync_upload, file_bytes, "photo.jpg"
+                )
+                uploaded_ids.append(giga_id)
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить фото {tg_file_id}: {e}")
+
+        return uploaded_ids
+
+    async def _cleanup(self, file_ids: list[str]) -> None:
+        """Удаляет файлы из GigaChat."""
+        for giga_id in file_ids:
+            await asyncio.to_thread(self._sync_delete, giga_id)
+
+    # --------------------------------------------------------
+    # ПУБЛИЧНЫЕ МЕТОДЫ
+    # --------------------------------------------------------
+    async def generate_with_photos(
+        self,
+        bot: Bot,
+        photos: list[dict],
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.6,
+        max_tokens: int = 2500,
+        max_photos: int = 10,
+    ) -> str:
+        """
+        Генерация с фото (свободный текст).
+
+        Используется в блоке 3 — создание объявления.
+        Возвращает текст ответа GigaChat.
+        """
+        if not photos:
+            raise ValueError("Нет фото для анализа")
+
+        uploaded_ids = await self._upload_photos(bot, photos, max_photos)
+        if not uploaded_ids:
+            raise RuntimeError("Не удалось загрузить ни одного фото в GigaChat")
+
+        logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
+
+        try:
+            result = await asyncio.to_thread(
+                self._sync_chat_with_attachments,
+                system_prompt,
+                user_prompt,
+                uploaded_ids,
+                temperature,
+                max_tokens,
+            )
+            return result
+        finally:
+            await self._cleanup(uploaded_ids)
+
+    async def analyze_with_photos_json(
         self,
         bot: Bot,
         photos: list[dict],
@@ -131,49 +208,20 @@ class GigaChatVisionService:
         max_photos: int = 10,
     ) -> dict:
         """
-        Анализирует фотографии через GigaChat Vision.
+        Анализ с фото, возвращает распарсенный JSON.
 
-        photos: список словарей вида {"file_id": "...", ...}
-                (Telegram file_id)
-        Возвращает распарсенный JSON-ответ от GigaChat.
-
-        Файлы автоматически удаляются из GigaChat после анализа.
+        Используется в блоках 5 и 6.
         """
         if not photos:
-            raise ValueError("Нет фотографий для анализа")
+            raise ValueError("Нет фото для анализа")
 
-        # Ограничение: GigaChat принимает до 10 файлов за запрос
-        photos = photos[:max_photos]
+        uploaded_ids = await self._upload_photos(bot, photos, max_photos)
+        if not uploaded_ids:
+            raise RuntimeError("Не удалось загрузить ни одного фото в GigaChat")
 
-        uploaded_ids: list[str] = []
+        logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
 
         try:
-            # 1. Скачиваем из Telegram + загружаем в GigaChat
-            logger.info(f"Vision: загружаю {len(photos)} фото в GigaChat…")
-
-            for photo in photos:
-                tg_file_id = photo.get("file_id")
-                if not tg_file_id:
-                    continue
-
-                try:
-                    file_bytes = await self._download_tg_photo(bot, tg_file_id)
-                    giga_id = await asyncio.to_thread(
-                        self._sync_upload, file_bytes, "photo.jpg"
-                    )
-                    uploaded_ids.append(giga_id)
-                except Exception as e:
-                    logger.warning(
-                        f"Не удалось загрузить фото {tg_file_id}: {e}"
-                    )
-
-            if not uploaded_ids:
-                raise RuntimeError("Не удалось загрузить ни одного фото в GigaChat")
-
-            logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
-
-            # 2. Отправляем запрос с attachments
-            logger.info("Vision: отправляю запрос в GigaChat…")
             result = await asyncio.to_thread(
                 self._sync_chat_with_attachments,
                 system_prompt,
@@ -183,7 +231,6 @@ class GigaChatVisionService:
                 max_tokens,
             )
 
-            # 3. Парсим JSON
             cleaned = result.strip()
             if cleaned.startswith("```json"):
                 cleaned = cleaned[7:]
@@ -199,11 +246,30 @@ class GigaChatVisionService:
                 logger.error(f"Vision: не удалось распарсить JSON: {e}")
                 logger.debug(f"Сырой ответ: {result[:500]}")
                 raise RuntimeError(f"GigaChat вернул невалидный JSON: {e}")
-
         finally:
-            # 4. Удаляем файлы из GigaChat (минимизация хранения)
-            for giga_id in uploaded_ids:
-                await asyncio.to_thread(self._sync_delete, giga_id)
+            await self._cleanup(uploaded_ids)
+
+    # Алиас для обратной совместимости с предыдущей версией
+    async def analyze_photos(
+        self,
+        bot: Bot,
+        photos: list[dict],
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.4,
+        max_tokens: int = 2500,
+        max_photos: int = 10,
+    ) -> dict:
+        """Совместимость со старым API (блок 6)."""
+        return await self.analyze_with_photos_json(
+            bot=bot,
+            photos=photos,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_photos=max_photos,
+        )
 
 
 # ============================================================
