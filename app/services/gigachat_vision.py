@@ -1,7 +1,14 @@
 """
 Сервис анализа изображений через GigaChat Vision.
 
-Логирует расход токенов в gigachat_usage.
+Возможности:
+- Скачивание фото из Telegram
+- Загрузка в GigaChat через upload_file
+- Описание фото (короткий текст для передачи в текстовый чат)
+- Анализ изображений с JSON-ответом (для блоков 5, 6)
+- Удаление файлов после использования
+
+Модель: GigaChat-2-Pro (поддерживает Vision).
 """
 
 from __future__ import annotations
@@ -20,8 +27,11 @@ from loguru import logger
 from app.config import settings
 
 
+# ============================================================
+# ВОССТАНОВЛЕНИЕ ОБРЕЗАННОГО JSON
+# ============================================================
 def _try_recover_json(text: str) -> dict | None:
-    """Восстанавливает обрезанный JSON."""
+    """Пытается восстановить обрезанный JSON для массива variants."""
     try:
         pattern = re.compile(
             r'\{\s*"approach"\s*:\s*"[^"]*"\s*,\s*'
@@ -221,29 +231,37 @@ class GigaChatVisionService:
         )
 
     # --------------------------------------------------------
-    # ПУБЛИЧНЫЕ МЕТОДЫ
+    # ГЛАВНЫЙ НОВЫЙ МЕТОД: ОПИСАНИЕ ФОТО (шаг 1)
     # --------------------------------------------------------
-    async def generate_with_photos(
+    async def describe_photos(
         self,
         bot: Bot,
         photos: list[dict],
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.6,
-        max_tokens: int = 5000,
+        temperature: float = 0.3,
+        max_tokens: int = 1500,
         max_photos: int = 10,
         user_id: int | None = None,
         task_id: int | None = None,
     ) -> str:
-        """Генерация с фото (свободный текст)."""
+        """
+        Описывает фото текстом (без JSON).
+
+        Возвращает короткий текст (300–800 символов), который
+        потом используется как вход для текстовой генерации.
+
+        Используется в блоке 3 (создание объявления) для обхода
+        ограничения длины Vision-модели.
+        """
         if not photos:
             raise ValueError("Нет фото для анализа")
 
         uploaded_ids = await self._upload_photos(bot, photos, max_photos)
         if not uploaded_ids:
-            raise RuntimeError("Не удалось загрузить ни одного фото в GigaChat")
+            raise RuntimeError("Не удалось загрузить ни одного фото")
 
-        logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
+        logger.info(f"Vision describe: загружено {len(uploaded_ids)} фото")
 
         try:
             result, usage = await asyncio.to_thread(
@@ -259,7 +277,7 @@ class GigaChatVisionService:
                 usage=usage,
                 user_id=user_id,
                 task_id=task_id,
-                call_type="vision",
+                call_type="vision_describe",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 prompt_len=len(system_prompt) + len(user_prompt),
@@ -267,6 +285,8 @@ class GigaChatVisionService:
                 photos_count=len(uploaded_ids),
                 success=True,
             )
+
+            logger.info(f"Vision describe: получено {len(result)} символов")
             return result
 
         except Exception as e:
@@ -274,7 +294,7 @@ class GigaChatVisionService:
                 usage=None,
                 user_id=user_id,
                 task_id=task_id,
-                call_type="vision",
+                call_type="vision_describe",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 prompt_len=len(system_prompt) + len(user_prompt),
@@ -287,6 +307,9 @@ class GigaChatVisionService:
         finally:
             await self._cleanup(uploaded_ids)
 
+    # --------------------------------------------------------
+    # СУЩЕСТВУЮЩИЙ МЕТОД: JSON-АНАЛИЗ (для блоков 5, 6)
+    # --------------------------------------------------------
     async def analyze_with_photos_json(
         self,
         bot: Bot,
@@ -305,7 +328,7 @@ class GigaChatVisionService:
 
         uploaded_ids = await self._upload_photos(bot, photos, max_photos)
         if not uploaded_ids:
-            raise RuntimeError("Не удалось загрузить ни одного фото в GigaChat")
+            raise RuntimeError("Не удалось загрузить ни одного фото")
 
         logger.info(f"Vision: загружено {len(uploaded_ids)} фото")
 
@@ -330,7 +353,6 @@ class GigaChatVisionService:
 
             try:
                 parsed = json.loads(cleaned)
-                parse_error = None
             except json.JSONDecodeError as e:
                 logger.error(f"Vision: не удалось распарсить JSON: {e}")
                 logger.debug(f"Сырой ответ: {result[:500]}")

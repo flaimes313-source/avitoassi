@@ -1,7 +1,9 @@
 ﻿"""
 Сценарий «Создать объявление» (блок 3 ТЗ).
-Vision: если есть фото — GigaChat их видит.
-Fallback: если Vision падает — работает только текст.
+
+Двухшаговая логика:
+1. Vision описывает фото текстом
+2. Текстовый GigaChat генерирует 3 длинных варианта
 """
 
 from __future__ import annotations
@@ -14,10 +16,10 @@ from loguru import logger
 
 from app.database import db, to_jsonb
 from app.prompts.create_listing import (
+    DESCRIBE_USER_PROMPT,
     SYSTEM_PROMPT,
-    SYSTEM_PROMPT_VISION,
+    SYSTEM_PROMPT_DESCRIBE_PHOTO,
     build_user_prompt,
-    build_user_prompt_with_photos,
 )
 from app.services.gigachat_service import gigachat_service
 from app.services.gigachat_vision import gigachat_vision_service
@@ -88,7 +90,7 @@ async def _get_selected_listing(user_id: int) -> dict | None:
 
 
 # ============================================================
-# ВХОД В СЦЕНАРИЙ
+# ВХОД
 # ============================================================
 @router.callback_query(F.data == CB.MENU_CREATE)
 @router.message(F.text == MENU.CREATE)
@@ -169,7 +171,7 @@ async def on_photo_received(
 ) -> None:
     task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
-        await message.answer("Ошибка: задача не найдена. Начните заново.")
+        await message.answer("Ошибка: задача не найдена.")
         await state.clear()
         return
 
@@ -226,7 +228,7 @@ async def on_text_received(
 
     task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
-        await message.answer("Ошибка: задача не найдена. Начните заново.")
+        await message.answer("Ошибка: задача не найдена.")
         await state.clear()
         return
 
@@ -266,13 +268,13 @@ async def prompt_add_photo(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == CB.CREATE_ADD_TEXT)
 async def prompt_add_text(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.answer(
-        "✏️ Напиши, что за товар, состояние, характеристики, цену. Одним сообщением."
+        "✏️ Напиши, что за товар, состояние, характеристики, цену."
     )
     await callback.answer()
 
 
 # ============================================================
-# ГЕНЕРАЦИЯ
+# ГЕНЕРАЦИЯ (двухшаговая)
 # ============================================================
 @router.callback_query(F.data == CB.CREATE_DONE_MATERIALS)
 @router.callback_query(F.data == CB.CREATE_GENERATE)
@@ -296,7 +298,7 @@ async def materials_done(
     await callback.answer("Запускаю генерацию…")
     await callback.message.answer(
         "✅ Материалы собраны.\n\n"
-        "Запускаю генерацию трёх вариантов. Это займёт до 30 секунд…"
+        "Запускаю генерацию трёх вариантов. Это займёт до 40 секунд…"
     )
     await _run_generation(callback.message, state, task_id, bot=bot)
 
@@ -329,52 +331,58 @@ async def _run_generation(
         )
         return
 
-    result = None
+    # --- ШАГ 1: Описание фото через Vision ---
+    photo_description = collected.get("photo_description", "")
 
-    # --- Vision ---
-    if photos and bot is not None:
+    if photos and bot is not None and not photo_description:
         try:
-            logger.info(f"_run_generation: пробую Vision ({len(photos)} фото)")
-            user_prompt = build_user_prompt_with_photos(collected)
-            result = await gigachat_vision_service.analyze_with_photos_json(
+            logger.info(f"Шаг 1: Vision описывает {len(photos)} фото")
+            photo_description = await gigachat_vision_service.describe_photos(
                 bot=bot,
                 photos=photos,
-                system_prompt=SYSTEM_PROMPT_VISION,
-                user_prompt=user_prompt,
-                temperature=0.6,
-                max_tokens=8000,
+                system_prompt=SYSTEM_PROMPT_DESCRIBE_PHOTO,
+                user_prompt=DESCRIBE_USER_PROMPT,
+                temperature=0.3,
+                max_tokens=1500,
                 user_id=user_id,
                 task_id=task_id,
             )
-            logger.info("_run_generation: Vision успешен")
-        except Exception as e:
-            logger.warning(f"_run_generation: Vision упал, fallback на текст: {e}")
-            result = None
+            logger.info(f"Шаг 1 готов: {len(photo_description)} символов")
 
-    # --- Fallback: текст ---
-    if result is None:
-        try:
-            logger.info("_run_generation: текстовый режим")
-            user_prompt = build_user_prompt({
-                "extra": text,
-                "photos_count": len(photos),
-            })
-            result = await gigachat_service.generate_json(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                temperature=0.6,
-                max_tokens=6000,
-                user_id=user_id,
-                task_id=task_id,
+            # Сохраняем описание в collected_data
+            collected["photo_description"] = photo_description
+            await db.execute(
+                "UPDATE tasks SET collected_data = collected_data || %s::jsonb WHERE id = %s",
+                (to_jsonb({"photo_description": photo_description}), task_id),
             )
         except Exception as e:
-            logger.exception(f"Ошибка генерации: {e}")
-            await task_manager.complete_task(task_id, status="failed", technical_failure=True)
-            await message.answer(
-                "❌ Не удалось сгенерировать объявление. Попробуй позже.\nЛимит не списан.",
-                reply_markup=cancel_and_back(),
-            )
-            return
+            logger.warning(f"Шаг 1 (Vision describe) упал: {e}")
+            photo_description = ""
+
+    # --- ШАГ 2: Генерация 3 вариантов (текстовый GigaChat) ---
+    try:
+        logger.info("Шаг 2: генерация 3 вариантов текстовым GigaChat")
+        user_prompt = build_user_prompt({
+            "extra": text,
+            "photo_description": photo_description,
+        })
+        result = await gigachat_service.generate_json(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=0.6,
+            max_tokens=6000,
+            user_id=user_id,
+            task_id=task_id,
+        )
+        logger.info("Шаг 2: генерация успешна")
+    except Exception as e:
+        logger.exception(f"Ошибка генерации: {e}")
+        await task_manager.complete_task(task_id, status="failed", technical_failure=True)
+        await message.answer(
+            "❌ Не удалось сгенерировать объявление. Попробуй позже.\nЛимит не списан.",
+            reply_markup=cancel_and_back(),
+        )
+        return
 
     variants = result.get("variants", [])
     if not variants:
@@ -548,6 +556,9 @@ async def regenerate(
             "SELECT collected_data FROM tasks WHERE id = %s", (task["id"],),
         )
         collected = old_task["collected_data"] if old_task else {}
+
+        # При перегенерации сбрасываем описание фото, чтобы Vision отработал заново
+        collected.pop("photo_description", None)
 
         new_task = await task_manager.create_task(
             user=user,
