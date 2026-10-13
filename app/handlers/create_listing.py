@@ -16,6 +16,7 @@ from app.services.gigachat_service import gigachat_service
 from app.services.task_manager import task_manager
 from app.utils.keyboards import (
     CB,
+    MENU,
     cancel_and_back,
     create_listing_after_photo,
     create_listing_ready,
@@ -30,20 +31,16 @@ router = Router(name="create_listing")
 
 
 class CreateStates(StatesGroup):
-    collecting = State()      # сбор материалов
-    choosing = State()        # выбор варианта
-    editing = State()         # редактирование выбранного
+    collecting = State()
+    choosing = State()
+    editing = State()
 
 
 # ============================================================
-# УТИЛИТА: получить task_id из state ИЛИ из БД
+# УТИЛИТЫ
 # ============================================================
 async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
-    """
-    Пытается получить task_id из FSM.
-    Если нет — ищет последнюю активную задачу create_listing
-    в БД для этого пользователя.
-    """
+    """task_id из state или из БД (последняя активная задача)."""
     data = await state.get_data()
     task_id = data.get("task_id")
 
@@ -59,35 +56,26 @@ async def _resolve_task_id(state: FSMContext, user_id: int) -> int | None:
     task = await db.fetch_one(
         """
         SELECT id FROM tasks
-        WHERE user_id = %s
-          AND task_type = 'create_listing'
-          AND status = 'active'
-        ORDER BY created_at DESC
-        LIMIT 1
+        WHERE user_id = %s AND task_type = 'create_listing' AND status = 'active'
+        ORDER BY created_at DESC LIMIT 1
         """,
         (user_id,),
     )
     if task:
-        logger.info(f"task_id найден в БД: {task['id']}")
         await state.update_data(task_id=task["id"])
         return task["id"]
-
     return None
 
 
-# ============================================================
-# УТИЛИТА: получить выбранный listing из БД
-# ============================================================
 async def _get_selected_listing(user_id: int) -> dict | None:
-    """Возвращает последний выбранный листинг пользователя."""
+    """Последний выбранный листинг пользователя."""
     return await db.fetch_one(
         """
         SELECT l.id, l.title, l.body, l.item_id, l.approach
         FROM listings l
         JOIN items i ON i.id = l.item_id
         WHERE i.user_id = %s AND l.is_selected = TRUE
-        ORDER BY l.created_at DESC
-        LIMIT 1
+        ORDER BY l.created_at DESC LIMIT 1
         """,
         (user_id,),
     )
@@ -97,7 +85,7 @@ async def _get_selected_listing(user_id: int) -> dict | None:
 # ВХОД В СЦЕНАРИЙ
 # ============================================================
 @router.callback_query(F.data == CB.MENU_CREATE)
-@router.message(F.text == "📝 Создать объявление")
+@router.message(F.text == MENU.CREATE)
 async def start_create(
     event: Message | CallbackQuery,
     state: FSMContext,
@@ -152,7 +140,6 @@ async def start_create(
     )
     await state.update_data(task_id=task["id"])
     await state.set_state(CreateStates.collecting)
-    logger.info(f"Создана задача id={task['id']}")
 
     await message.answer(
         "📝 <b>Создаём объявление</b>\n\n"
@@ -228,13 +215,7 @@ async def on_text_received(
     user: dict,
     db,
 ) -> None:
-    if message.text in {
-        "📝 Создать объявление", "🛠 Улучшить объявление",
-        "🔍 Анализ конкурентов", "📸 Помощь с фотографиями",
-        "📈 Стратегия продвижения", "💬 Ответы покупателям",
-        "📂 Мои объявления", "💳 Тариф и подписка",
-        "⚙️ Настройки и помощь",
-    }:
+    if message.text in MENU.all_texts():
         return
 
     task_id = await _resolve_task_id(state, user["id"])
@@ -279,8 +260,7 @@ async def prompt_add_photo(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == CB.CREATE_ADD_TEXT)
 async def prompt_add_text(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.answer(
-        "✏️ Напиши, что за товар, состояние, характеристики, цену. "
-        "Одним сообщением."
+        "✏️ Напиши, что за товар, состояние, характеристики, цену. Одним сообщением."
     )
     await callback.answer()
 
@@ -323,15 +303,12 @@ async def _run_generation(
 
     task = await db.fetch_one("SELECT * FROM tasks WHERE id = %s", (task_id,))
     if not task:
-        logger.warning(f"задача {task_id} не найдена в БД")
         await message.answer("Ошибка: задача не найдена.")
         return
 
     collected = task["collected_data"] or {}
     photos = collected.get("photos", [])
     text = collected.get("extra", "").strip()
-
-    logger.info(f"_run_generation: photos={len(photos)}, text_length={len(text)}")
 
     if not text and not photos:
         await message.answer(
@@ -348,7 +325,6 @@ async def _run_generation(
     user_prompt = build_user_prompt(prompt_data)
 
     try:
-        logger.info("_run_generation: вызов GigaChat…")
         result = await gigachat_service.generate_json(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
@@ -358,21 +334,16 @@ async def _run_generation(
         logger.info(f"_run_generation: GigaChat ответил, ключи={list(result.keys())}")
     except Exception as e:
         logger.exception(f"Ошибка генерации: {e}")
-        await task_manager.complete_task(
-            task_id, status="failed", technical_failure=True,
-        )
+        await task_manager.complete_task(task_id, status="failed", technical_failure=True)
         await message.answer(
-            "❌ Не удалось сгенерировать объявление. Попробуй позже.\n"
-            "Лимит не списан.",
+            "❌ Не удалось сгенерировать объявление. Попробуй позже.\nЛимит не списан.",
             reply_markup=cancel_and_back(),
         )
         return
 
     variants = result.get("variants", [])
     if not variants:
-        await task_manager.complete_task(
-            task_id, status="failed", technical_failure=True,
-        )
+        await task_manager.complete_task(task_id, status="failed", technical_failure=True)
         await message.answer(
             "❌ GigaChat вернул пустой ответ. Попробуй ещё раз.",
             reply_markup=cancel_and_back(),
@@ -394,11 +365,7 @@ async def _run_generation(
         title = variant.get("title", "")
         body = variant.get("body", "")
 
-        await message.answer(
-            f"<b>{header}</b>\n\n"
-            f"<b>{title}</b>\n\n"
-            f"{body}"
-        )
+        await message.answer(f"<b>{header}</b>\n\n<b>{title}</b>\n\n{body}")
 
     await message.answer(
         "Выбери вариант, который нравится больше:",
@@ -419,14 +386,12 @@ async def pick_variant(
 
     task_id = await _resolve_task_id(state, user["id"])
     if not task_id:
-        # Задача уже завершена? Ищем последний результат
         task = await db.fetch_one(
             """
             SELECT * FROM tasks
             WHERE user_id = %s AND task_type = 'create_listing'
               AND result IS NOT NULL
-            ORDER BY created_at DESC
-            LIMIT 1
+            ORDER BY created_at DESC LIMIT 1
             """,
             (user["id"],),
         )
@@ -450,13 +415,8 @@ async def pick_variant(
 
     variant = variants[idx]
 
-    # Создаём карточку товара и сохраняем выбранный вариант
     item = await db.execute_returning(
-        """
-        INSERT INTO items (user_id, name)
-        VALUES (%s, %s)
-        RETURNING *
-        """,
+        "INSERT INTO items (user_id, name) VALUES (%s, %s) RETURNING *",
         (user["id"], variant.get("title", "Без названия")[:100]),
     )
 
@@ -474,7 +434,6 @@ async def pick_variant(
         ),
     )
 
-    # Завершаем задачу (лимит списывается)
     await task_manager.complete_task(
         task_id, status="done",
         result={"variants": variants, "selected_index": idx},
@@ -488,7 +447,6 @@ async def pick_variant(
     )
     await state.set_state(CreateStates.editing)
 
-    # Показываем выбранный вариант ЦЕЛИКОМ + все действия
     approach_label = {
         "factual": "Фактический",
         "friendly": "Дружелюбный",
@@ -535,13 +493,11 @@ async def regenerate(
 ) -> None:
     logger.info(f"regenerate: user={callback.from_user.id}")
 
-    # Ищем ЛЮБУЮ задачу create_listing с материалами (не только активную)
     task = await db.fetch_one(
         """
         SELECT id, status FROM tasks
         WHERE user_id = %s AND task_type = 'create_listing'
-        ORDER BY created_at DESC
-        LIMIT 1
+        ORDER BY created_at DESC LIMIT 1
         """,
         (user["id"],),
     )
@@ -550,11 +506,9 @@ async def regenerate(
         await callback.answer("Нечего перегенерировать. Начните заново.", show_alert=True)
         return
 
-    # Если задача завершена — создаём новую с теми же материалами
     if task["status"] != "active":
         old_task = await db.fetch_one(
-            "SELECT collected_data FROM tasks WHERE id = %s",
-            (task["id"],),
+            "SELECT collected_data FROM tasks WHERE id = %s", (task["id"],),
         )
         collected = old_task["collected_data"] if old_task else {}
 
@@ -572,10 +526,11 @@ async def regenerate(
     await state.set_state(CreateStates.choosing)
 
     await callback.answer("Генерирую заново…")
-    await callback.message.answer(
-        "🔄 Генерирую заново…"
-    )
-    await _run_generation(callback.message, state, task_id)
+
+    # Исправлено: без `await` перед присваиванием
+    message = callback.message
+    await message.answer("🔄 Генерирую заново…")
+    await _run_generation(message, state, task_id)
 
 
 # ============================================================
@@ -587,7 +542,6 @@ async def edit_listing(
     state: FSMContext,
     user: dict,
 ) -> None:
-    """Начинает редактирование выбранного варианта."""
     logger.info(f"edit_listing: user={callback.from_user.id}")
 
     listing = await _get_selected_listing(user["id"])
@@ -633,7 +587,6 @@ async def on_edit_text(
         await state.clear()
         return
 
-    # Редактируем заголовок или тело
     if text.lower().startswith("заголовок:"):
         new_title = text.split(":", 1)[1].strip()
         await db.execute(
@@ -648,7 +601,6 @@ async def on_edit_text(
         )
         action = "Текст обновлён"
 
-    # Показываем обновлённый текст
     updated = await db.fetch_one(
         "SELECT title, body FROM listings WHERE item_id = %s AND is_selected = TRUE",
         (item_id,),
@@ -667,11 +619,9 @@ async def on_edit_text(
         reply_markup=listing_after_edit(),
     )
 
-    # НЕ сбрасываем состояние — пользователь может редактировать ещё
-
 
 # ============================================================
-# ОТМЕНА СЦЕНАРИЯ
+# ОТМЕНА
 # ============================================================
 @router.callback_query(F.data == CB.CANCEL, CreateStates.collecting)
 @router.callback_query(F.data == CB.CANCEL, CreateStates.choosing)
@@ -685,7 +635,6 @@ async def cancel_create(
     task_id = await _resolve_task_id(state, user["id"])
     if task_id:
         await task_manager.complete_task(task_id, status="cancelled")
-        logger.info(f"Задача {task_id} отменена")
 
     await state.clear()
 

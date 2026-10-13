@@ -54,7 +54,7 @@ class CB:
     CREATE_GENERATE = "create:generate"
     CREATE_PROCEED_AS_IS = "create:proceed_as_is"
 
-    # Выбор варианта (1/2/3)
+    # Выбор варианта
     LISTING_PICK_1 = "listing:pick:1"
     LISTING_PICK_2 = "listing:pick:2"
     LISTING_PICK_3 = "listing:pick:3"
@@ -138,6 +138,30 @@ class CB:
 
 
 # ============================================================
+# ТЕКСТЫ КНОПОК ГЛАВНОГО МЕНЮ (единый источник)
+# ============================================================
+class MENU:
+    CREATE = "📝 Создать"
+    IMPROVE = "🛠 Улучшить"
+    COMPETITORS = "🔍 Конкуренты"
+    PHOTOS = "📸 Фото"
+    STRATEGY = "📈 Стратегия"
+    BUYER_REPLIES = "💬 Ответы"
+    ITEMS = "📂 Мои"
+    SUBSCRIPTION = "💳 Тариф"
+    SETTINGS = "⚙️ Настройки"
+
+    @classmethod
+    def all_texts(cls) -> set[str]:
+        """Множество всех текстов меню — для фильтра-исключения."""
+        return {
+            cls.CREATE, cls.IMPROVE, cls.COMPETITORS,
+            cls.PHOTOS, cls.STRATEGY, cls.BUYER_REPLIES,
+            cls.ITEMS, cls.SUBSCRIPTION, cls.SETTINGS,
+        }
+
+
+# ============================================================
 # ХЕЛПЕРЫ
 # ============================================================
 def btn(text: str, callback_data: str) -> InlineKeyboardButton:
@@ -149,19 +173,30 @@ def btn_url(text: str, url: str) -> InlineKeyboardButton:
 
 
 # ============================================================
-# ГЛАВНОЕ МЕНЮ
+# ГЛАВНОЕ МЕНЮ (2 кнопки в ряд)
 # ============================================================
 def main_menu_reply() -> ReplyKeyboardMarkup:
+    """Главное меню — 2 кнопки в ряд (компактнее)."""
     kb = [
-        [KeyboardButton(text="📝 Создать объявление")],
-        [KeyboardButton(text="🛠 Улучшить объявление")],
-        [KeyboardButton(text="🔍 Анализ конкурентов")],
-        [KeyboardButton(text="📸 Помощь с фотографиями")],
-        [KeyboardButton(text="📈 Стратегия продвижения")],
-        [KeyboardButton(text="💬 Ответы покупателям")],
-        [KeyboardButton(text="📂 Мои объявления")],
-        [KeyboardButton(text="💳 Тариф и подписка")],
-        [KeyboardButton(text="⚙️ Настройки и помощь")],
+        [
+            KeyboardButton(text=MENU.CREATE),
+            KeyboardButton(text=MENU.IMPROVE),
+        ],
+        [
+            KeyboardButton(text=MENU.COMPETITORS),
+            KeyboardButton(text=MENU.PHOTOS),
+        ],
+        [
+            KeyboardButton(text=MENU.STRATEGY),
+            KeyboardButton(text=MENU.BUYER_REPLIES),
+        ],
+        [
+            KeyboardButton(text=MENU.ITEMS),
+            KeyboardButton(text=MENU.SUBSCRIPTION),
+        ],
+        [
+            KeyboardButton(text=MENU.SETTINGS),
+        ],
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -173,15 +208,23 @@ def main_menu_reply() -> ReplyKeyboardMarkup:
 
 def main_menu_inline() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(btn("📝 Создать объявление", CB.MENU_CREATE))
-    builder.row(btn("🛠 Улучшить объявление", CB.MENU_IMPROVE))
-    builder.row(btn("🔍 Анализ конкурентов", CB.MENU_COMPETITORS))
-    builder.row(btn("📸 Помощь с фотографиями", CB.MENU_PHOTOS))
-    builder.row(btn("📈 Стратегия продвижения", CB.MENU_STRATEGY))
-    builder.row(btn("💬 Ответы покупателям", CB.MENU_BUYER_REPLIES))
-    builder.row(btn("📂 Мои объявления и история", CB.MENU_ITEMS))
-    builder.row(btn("💳 Тариф и подписка", CB.MENU_SUBSCRIPTION))
-    builder.row(btn("⚙️ Настройки и помощь", CB.MENU_SETTINGS))
+    builder.row(
+        btn("📝 Создать", CB.MENU_CREATE),
+        btn("🛠 Улучшить", CB.MENU_IMPROVE),
+    )
+    builder.row(
+        btn("🔍 Конкуренты", CB.MENU_COMPETITORS),
+        btn("📸 Фото", CB.MENU_PHOTOS),
+    )
+    builder.row(
+        btn("📈 Стратегия", CB.MENU_STRATEGY),
+        btn("💬 Ответы", CB.MENU_BUYER_REPLIES),
+    )
+    builder.row(
+        btn("📂 Мои", CB.MENU_ITEMS),
+        btn("💳 Тариф", CB.MENU_SUBSCRIPTION),
+    )
+    builder.row(btn("⚙️ Настройки", CB.MENU_SETTINGS))
     return builder.as_markup()
 
 
@@ -237,28 +280,25 @@ def onboarding_privacy() -> InlineKeyboardMarkup:
 # СОЗДАНИЕ ОБЪЯВЛЕНИЯ (блок 3)
 # ============================================================
 def create_listing_start() -> InlineKeyboardMarkup:
-    """Стартовое меню сбора материалов."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("📸 Добавить фото", CB.CREATE_ADD_PHOTO))
-    builder.row(btn("✏️ Добавить текст о товаре", CB.CREATE_ADD_TEXT))
+    builder.row(btn("✏️ Добавить текст", CB.CREATE_ADD_TEXT))
     builder.row(btn("✅ Материалов достаточно", CB.CREATE_DONE_MATERIALS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def create_listing_after_photo() -> InlineKeyboardMarkup:
-    """После получения фото."""
     builder = InlineKeyboardBuilder()
-    builder.row(btn("✏️ Добавить текст о товаре", CB.CREATE_ADD_TEXT))
+    builder.row(btn("✏️ Добавить текст", CB.CREATE_ADD_TEXT))
     builder.row(btn("✅ Материалов достаточно", CB.CREATE_DONE_MATERIALS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def create_listing_ready() -> InlineKeyboardMarkup:
-    """Материалы собраны — можно генерировать."""
     builder = InlineKeyboardBuilder()
-    builder.row(btn("⚡ Сгенерировать объявления", CB.CREATE_GENERATE))
+    builder.row(btn("⚡ Сгенерировать", CB.CREATE_GENERATE))
     builder.row(
         btn("📸 Ещё фото", CB.CREATE_ADD_PHOTO),
         btn("✏️ Ещё текст", CB.CREATE_ADD_TEXT),
@@ -268,22 +308,18 @@ def create_listing_ready() -> InlineKeyboardMarkup:
 
 
 def create_listing_question() -> InlineKeyboardMarkup:
-    """Ответ на уточняющий вопрос."""
     builder = InlineKeyboardBuilder()
     builder.row(
         btn("🤷 Не знаю", CB.DONT_KNOW),
         btn("⏭ Пропустить", CB.SKIP),
     )
-    builder.row(btn("⚡ Хватит вопросов, генерируй", CB.CREATE_PROCEED_AS_IS))
+    builder.row(btn("⚡ Хватит вопросов", CB.CREATE_PROCEED_AS_IS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def listing_variants() -> InlineKeyboardMarkup:
-    """
-    Выбор одного из 3 сгенерированных вариантов.
-    БЕЗ кнопки «Редактировать» — сначала надо выбрать вариант.
-    """
+    """Выбор одного из 3 вариантов. БЕЗ «Редактировать» — сначала выбери."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("1️⃣ Фактический", CB.LISTING_PICK_1))
     builder.row(btn("2️⃣ Дружелюбный", CB.LISTING_PICK_2))
@@ -294,25 +330,21 @@ def listing_variants() -> InlineKeyboardMarkup:
 
 
 def listing_after_pick() -> InlineKeyboardMarkup:
-    """
-    Действия после выбора варианта.
-    Здесь уже есть «Редактировать» — вариант выбран.
-    """
+    """После выбора варианта — здесь уже есть «Редактировать»."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("✏️ Редактировать", CB.LISTING_EDIT))
     builder.row(btn("🔄 Перегенерировать", CB.LISTING_REGEN))
-    builder.row(btn("📋 Показать текст ещё раз", CB.LISTING_COPY))
-    builder.row(btn("📈 Стратегия продвижения", CB.MENU_STRATEGY))
+    builder.row(btn("📋 Показать ещё раз", CB.LISTING_COPY))
+    builder.row(btn("📈 Стратегия", CB.MENU_STRATEGY))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
 
 def listing_after_edit() -> InlineKeyboardMarkup:
-    """Действия после редактирования текста."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("✏️ Редактировать ещё", CB.LISTING_EDIT))
     builder.row(btn("🔄 Перегенерировать", CB.LISTING_REGEN))
-    builder.row(btn("📈 Стратегия продвижения", CB.MENU_STRATEGY))
+    builder.row(btn("📈 Стратегия", CB.MENU_STRATEGY))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
@@ -322,8 +354,8 @@ def listing_after_edit() -> InlineKeyboardMarkup:
 # ============================================================
 def improve_materials() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(btn("📝 Текст объявления", CB.IMPROVE_MATERIAL_TEXT))
-    builder.row(btn("🔗 Ссылку на объявление", CB.IMPROVE_MATERIAL_LINK))
+    builder.row(btn("📝 Текст", CB.IMPROVE_MATERIAL_TEXT))
+    builder.row(btn("🔗 Ссылку", CB.IMPROVE_MATERIAL_LINK))
     builder.row(btn("📸 Скриншоты", CB.IMPROVE_MATERIAL_SCREEN))
     builder.row(btn("📊 Статистику", CB.IMPROVE_MATERIAL_STATS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
@@ -333,11 +365,11 @@ def improve_materials() -> InlineKeyboardMarkup:
 def improve_problems() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(btn("👁 Мало просмотров", CB.IMPROVE_PROBLEM_LOW_VIEWS))
-    builder.row(btn("⭐ Просмотры есть, мало избранного", CB.IMPROVE_PROBLEM_NO_FAVORITES))
-    builder.row(btn("💬 Избранное есть, нет сообщений", CB.IMPROVE_PROBLEM_NO_MESSAGES))
-    builder.row(btn("🤝 Сообщения есть, продажи нет", CB.IMPROVE_PROBLEM_NO_SALE))
-    builder.row(btn("⏳ Объявление долго не продаётся", CB.IMPROVE_PROBLEM_LONG))
-    builder.row(btn("⚡ Нужно продать быстрее", CB.IMPROVE_PROBLEM_FASTER))
+    builder.row(btn("⭐ Мало избранного", CB.IMPROVE_PROBLEM_NO_FAVORITES))
+    builder.row(btn("💬 Нет сообщений", CB.IMPROVE_PROBLEM_NO_MESSAGES))
+    builder.row(btn("🤝 Нет продажи", CB.IMPROVE_PROBLEM_NO_SALE))
+    builder.row(btn("⏳ Долго не продаётся", CB.IMPROVE_PROBLEM_LONG))
+    builder.row(btn("⚡ Продать быстрее", CB.IMPROVE_PROBLEM_FASTER))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
@@ -420,8 +452,8 @@ def settings_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(btn("🕐 Часовой пояс", CB.SET_TIMEZONE))
     builder.row(btn("⏰ Напоминания", CB.SET_REMINDERS))
-    builder.row(btn("📄 Что хранится обо мне", CB.SET_PRIVACY_INFO))
-    builder.row(btn("🗑 Удалить мои данные", CB.SET_DELETE_DATA))
+    builder.row(btn("📄 Что хранится", CB.SET_PRIVACY_INFO))
+    builder.row(btn("🗑 Удалить данные", CB.SET_DELETE_DATA))
     builder.row(btn("💬 Поддержка", CB.SET_SUPPORT))
     builder.row(btn("❓ Помощь", CB.SET_HELP))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
@@ -447,7 +479,7 @@ def reminders_menu(current_enabled: bool, current_interval: int | None) -> Inlin
     builder.row(btn(mark("Через 3 дня", 3), CB.REMIND_3D))
     builder.row(btn(mark("Через 7 дней", 7), CB.REMIND_7D))
     builder.row(btn(
-        "🔕 Отключить напоминания" if current_enabled else "🔔 Включить (через 3 дня)",
+        "🔕 Отключить" if current_enabled else "🔔 Включить",
         CB.REMIND_OFF if current_enabled else CB.REMIND_3D,
     ))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
