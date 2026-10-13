@@ -135,10 +135,11 @@ class CB:
     ADMIN_BROADCAST = "admin:broadcast"
     ADMIN_TICKETS = "admin:tickets"
     ADMIN_STATS = "admin:stats"
+    ADMIN_WHITELIST = "admin:whitelist"
 
 
 # ============================================================
-# ТЕКСТЫ КНОПОК ГЛАВНОГО МЕНЮ (единый источник)
+# ТЕКСТЫ КНОПОК ГЛАВНОГО МЕНЮ
 # ============================================================
 class MENU:
     CREATE = "📝 Создать"
@@ -176,27 +177,12 @@ def btn_url(text: str, url: str) -> InlineKeyboardButton:
 # ГЛАВНОЕ МЕНЮ (2 кнопки в ряд)
 # ============================================================
 def main_menu_reply() -> ReplyKeyboardMarkup:
-    """Главное меню — 2 кнопки в ряд (компактнее)."""
     kb = [
-        [
-            KeyboardButton(text=MENU.CREATE),
-            KeyboardButton(text=MENU.IMPROVE),
-        ],
-        [
-            KeyboardButton(text=MENU.COMPETITORS),
-            KeyboardButton(text=MENU.PHOTOS),
-        ],
-        [
-            KeyboardButton(text=MENU.STRATEGY),
-            KeyboardButton(text=MENU.BUYER_REPLIES),
-        ],
-        [
-            KeyboardButton(text=MENU.ITEMS),
-            KeyboardButton(text=MENU.SUBSCRIPTION),
-        ],
-        [
-            KeyboardButton(text=MENU.SETTINGS),
-        ],
+        [KeyboardButton(text=MENU.CREATE), KeyboardButton(text=MENU.IMPROVE)],
+        [KeyboardButton(text=MENU.COMPETITORS), KeyboardButton(text=MENU.PHOTOS)],
+        [KeyboardButton(text=MENU.STRATEGY), KeyboardButton(text=MENU.BUYER_REPLIES)],
+        [KeyboardButton(text=MENU.ITEMS), KeyboardButton(text=MENU.SUBSCRIPTION)],
+        [KeyboardButton(text=MENU.SETTINGS)],
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -208,22 +194,10 @@ def main_menu_reply() -> ReplyKeyboardMarkup:
 
 def main_menu_inline() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        btn("📝 Создать", CB.MENU_CREATE),
-        btn("🛠 Улучшить", CB.MENU_IMPROVE),
-    )
-    builder.row(
-        btn("🔍 Конкуренты", CB.MENU_COMPETITORS),
-        btn("📸 Фото", CB.MENU_PHOTOS),
-    )
-    builder.row(
-        btn("📈 Стратегия", CB.MENU_STRATEGY),
-        btn("💬 Ответы", CB.MENU_BUYER_REPLIES),
-    )
-    builder.row(
-        btn("📂 Мои", CB.MENU_ITEMS),
-        btn("💳 Тариф", CB.MENU_SUBSCRIPTION),
-    )
+    builder.row(btn("📝 Создать", CB.MENU_CREATE), btn("🛠 Улучшить", CB.MENU_IMPROVE))
+    builder.row(btn("🔍 Конкуренты", CB.MENU_COMPETITORS), btn("📸 Фото", CB.MENU_PHOTOS))
+    builder.row(btn("📈 Стратегия", CB.MENU_STRATEGY), btn("💬 Ответы", CB.MENU_BUYER_REPLIES))
+    builder.row(btn("📂 Мои", CB.MENU_ITEMS), btn("💳 Тариф", CB.MENU_SUBSCRIPTION))
     builder.row(btn("⚙️ Настройки", CB.MENU_SETTINGS))
     return builder.as_markup()
 
@@ -239,19 +213,13 @@ def back_to_menu() -> InlineKeyboardMarkup:
 
 def cancel_and_back() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        btn("❌ Отменить", CB.CANCEL),
-        btn("🏠 В меню", CB.MENU_MAIN),
-    )
+    builder.row(btn("❌ Отменить", CB.CANCEL), btn("🏠 В меню", CB.MENU_MAIN))
     return builder.as_markup()
 
 
 def confirm_keyboard(yes_text: str = "✅ Да", no_text: str = "❌ Нет") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        btn(yes_text, CB.CONFIRM_YES),
-        btn(no_text, CB.CONFIRM_NO),
-    )
+    builder.row(btn(yes_text, CB.CONFIRM_YES), btn(no_text, CB.CONFIRM_NO))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
@@ -299,27 +267,20 @@ def create_listing_after_photo() -> InlineKeyboardMarkup:
 def create_listing_ready() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(btn("⚡ Сгенерировать", CB.CREATE_GENERATE))
-    builder.row(
-        btn("📸 Ещё фото", CB.CREATE_ADD_PHOTO),
-        btn("✏️ Ещё текст", CB.CREATE_ADD_TEXT),
-    )
+    builder.row(btn("📸 Ещё фото", CB.CREATE_ADD_PHOTO), btn("✏️ Ещё текст", CB.CREATE_ADD_TEXT))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def create_listing_question() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        btn("🤷 Не знаю", CB.DONT_KNOW),
-        btn("⏭ Пропустить", CB.SKIP),
-    )
+    builder.row(btn("🤷 Не знаю", CB.DONT_KNOW), btn("⏭ Пропустить", CB.SKIP))
     builder.row(btn("⚡ Хватит вопросов", CB.CREATE_PROCEED_AS_IS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
 
 def listing_variants() -> InlineKeyboardMarkup:
-    """Выбор одного из 3 вариантов. БЕЗ «Редактировать» — сначала выбери."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("1️⃣ Фактический", CB.LISTING_PICK_1))
     builder.row(btn("2️⃣ Дружелюбный", CB.LISTING_PICK_2))
@@ -330,7 +291,6 @@ def listing_variants() -> InlineKeyboardMarkup:
 
 
 def listing_after_pick() -> InlineKeyboardMarkup:
-    """После выбора варианта — здесь уже есть «Редактировать»."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("✏️ Редактировать", CB.LISTING_EDIT))
     builder.row(btn("🔄 Перегенерировать", CB.LISTING_REGEN))
@@ -424,7 +384,7 @@ def buyer_reply_goals() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# ТАРИФЫ (блоки 11–12)
+# ТАРИФЫ
 # ============================================================
 def subscription_menu(is_pro: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -502,7 +462,16 @@ def support_menu() -> InlineKeyboardMarkup:
 # ============================================================
 def admin_panel() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(btn("🎁 Белый список", CB.ADMIN_WHITELIST))
     builder.row(btn("🎫 Тикеты поддержки", CB.ADMIN_TICKETS))
     builder.row(btn("📢 Рассылка", CB.ADMIN_BROADCAST))
     builder.row(btn("📊 Статистика", CB.ADMIN_STATS))
+    return builder.as_markup()
+
+
+def admin_whitelist_menu() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("➕ Добавить", "admin:wl:add"))
+    builder.row(btn("➖ Удалить", "admin:wl:remove"))
+    builder.row(btn("🔙 Назад", CB.ADMIN_PANEL))
     return builder.as_markup()

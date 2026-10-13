@@ -426,3 +426,33 @@ CREATE TRIGGER trg_tickets_updated_at
 -- ============================================================
 -- КОНЕЦ СХЕМЫ
 -- ============================================================
+-- ============================================================
+-- БЕЛЫЙ СПИСОК (безлимитный PRO без оплаты)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS whitelist (
+    id                  BIGSERIAL PRIMARY KEY,
+    telegram_id         BIGINT UNIQUE NOT NULL,
+
+    -- Кто добавил (telegram_id админа)
+    added_by            BIGINT,
+
+    -- Заметка: за что добавили
+    note                TEXT,
+
+    -- Срок действия (NULL = бессрочно)
+    expires_at          TIMESTAMPTZ,
+
+    -- Активен ли (можно временно отключить, не удаляя)
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_whitelist_telegram ON whitelist(telegram_id)
+    WHERE is_active = TRUE;
+
+DROP TRIGGER IF EXISTS trg_whitelist_updated_at ON whitelist;
+CREATE TRIGGER trg_whitelist_updated_at
+    BEFORE UPDATE ON whitelist
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

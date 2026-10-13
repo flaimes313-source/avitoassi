@@ -2,7 +2,7 @@
 Менеджер задач и лимитов (блоки 9, 11 ТЗ).
 
 Центральная точка для:
-- проверки лимитов Free/PRO
+- проверки лимитов Free/PRO/whitelist
 - создания и завершения задач
 - записи истории диалога внутри задачи
 - предотвращения двойного списания лимита
@@ -43,8 +43,8 @@ class LimitCheckResult:
         reason: почему нельзя (если allowed=False)
         used: сколько уже использовано
         limit: сколько всего доступно
-        period: 'month' или 'day'
-        existing_task: активная задача, если есть (её можно продолжить)
+        period: 'month' | 'day' | 'whitelist'
+        existing_task: активная задача, если есть
     """
 
     def __init__(
@@ -85,15 +85,29 @@ class TaskManager:
         """
         Проверяет, может ли пользователь запустить задачу.
 
-        Сначала ищет активную задачу этого типа — если есть,
-        разрешает продолжить без списания лимита (блок 11 ТЗ).
-
-        Потом считает использованные задачи за период.
+        Порядок:
+        1. Whitelist — безлимит
+        2. Активная задача этого типа — можно продолжить без списания
+        3. Лимит по тарифу
         """
         user_id = user["id"]
         tariff = user["tariff"]
 
-        # 1. Ищем активную задачу этого типа
+        # 0. Whitelist — безлимит
+        from app.services.whitelist import whitelist_service
+        try:
+            if await whitelist_service.is_whitelisted(user["telegram_id"]):
+                logger.debug(f"Пользователь {user_id}: в whitelist, безлимит")
+                return LimitCheckResult(
+                    allowed=True,
+                    used=0,
+                    limit=999999,
+                    period="whitelist",
+                )
+        except Exception as e:
+            logger.warning(f"Ошибка проверки whitelist: {e}")
+
+        # 1. Активная задача этого типа
         active_task = await db.fetch_one(
             """
             SELECT * FROM tasks
@@ -149,7 +163,7 @@ class TaskManager:
         )
 
     async def _count_tasks_today(self, user_id: int) -> int:
-        """Считает завершённые задачи за сегодня (по часовому поясу UTC)."""
+        """Считает завершённые задачи за сегодня (UTC)."""
         count = await db.fetch_val(
             """
             SELECT COUNT(*) FROM tasks
@@ -189,9 +203,7 @@ class TaskManager:
     ) -> dict[str, Any]:
         """
         Создаёт новую задачу в БД.
-
-        ВАЖНО: limit_charged остаётся FALSE. Списываем лимит
-        только при успешном завершении (complete_task).
+        limit_charged остаётся FALSE до успешного завершения.
         """
         user_id = user["id"]
 
@@ -226,10 +238,7 @@ class TaskManager:
         task_id: int,
         patch: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """
-        Мержит патч в collected_data (JSONB || JSONB).
-        Удобно для пошагового сбора материалов.
-        """
+        """Мержит патч в collected_data."""
         return await db.execute_returning(
             """
             UPDATE tasks
@@ -288,15 +297,11 @@ class TaskManager:
         """
         Завершает задачу.
 
-        Логика списания лимита:
+        Списание лимита:
         - status='done' и technical_failure=False → списываем
         - status='failed' или technical_failure=True → НЕ списываем
         - status='cancelled' → НЕ списываем
-
-        Блок 11 ТЗ: «Не списывает лимит за технический сбой,
-        если результат не выдан».
         """
-        # Определяем, списывать ли лимит
         should_charge = status == "done" and not technical_failure
 
         row = await db.execute_returning(
@@ -337,12 +342,7 @@ class TaskManager:
         user_id: int,
         task_type: TaskType | None = None,
     ) -> int:
-        """
-        Отменяет все активные задачи пользователя
-        (опционально — только конкретного типа).
-
-        Возвращает количество отменённых.
-        """
+        """Отменяет все активные задачи пользователя (опц. по типу)."""
         if task_type:
             rows = await db.fetch_all(
                 """
@@ -388,21 +388,16 @@ class TaskManager:
             return await db.fetch_one(
                 """
                 SELECT * FROM tasks
-                WHERE user_id = %s
-                  AND status = 'active'
-                  AND task_type = %s
-                ORDER BY created_at DESC
-                LIMIT 1
+                WHERE user_id = %s AND status = 'active' AND task_type = %s
+                ORDER BY created_at DESC LIMIT 1
                 """,
                 (user_id, task_type),
             )
         return await db.fetch_one(
             """
             SELECT * FROM tasks
-            WHERE user_id = %s
-              AND status = 'active'
-            ORDER BY created_at DESC
-            LIMIT 1
+            WHERE user_id = %s AND status = 'active'
+            ORDER BY created_at DESC LIMIT 1
             """,
             (user_id,),
         )
@@ -416,19 +411,24 @@ class TaskManager:
     ) -> dict[str, Any]:
         """
         Возвращает статус лимита для показа пользователю.
-
-        Пример:
-            {
-                "tariff": "free",
-                "used": 2,
-                "limit": 3,
-                "remaining": 1,
-                "period": "month",
-                "text": "Free: 2 из 3 задач за месяц. Осталось 1."
-            }
         """
-        tariff = user["tariff"]
         user_id = user["id"]
+        tariff = user["tariff"]
+
+        # Whitelist — безлимит
+        from app.services.whitelist import whitelist_service
+        try:
+            if await whitelist_service.is_whitelisted(user["telegram_id"]):
+                return {
+                    "tariff": "whitelist",
+                    "used": 0,
+                    "limit": 999999,
+                    "remaining": 999999,
+                    "period": "whitelist",
+                    "text": "🎁 <b>Безлимит</b> (белый список). Задач не ограничено.",
+                }
+        except Exception as e:
+            logger.warning(f"Ошибка проверки whitelist в get_limit_status: {e}")
 
         if tariff == "pro":
             limit = settings.pro_daily_tasks
