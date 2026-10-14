@@ -453,7 +453,7 @@ def reminders_menu(current_enabled: bool, current_interval: int | None) -> Inlin
     builder.row(btn(mark("Через 3 дня", 3), CB.REMIND_3D))
     builder.row(btn(mark("Через 7 дней", 7), CB.REMIND_7D))
     builder.row(btn(
-        "🔕 Отключить" if current_enabled else "🔔 Включить",
+        "🔕 Отключить напоминания" if current_enabled else "🔔 Включить напоминания",
         CB.REMIND_OFF if current_enabled else CB.REMIND_3D,
     ))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))

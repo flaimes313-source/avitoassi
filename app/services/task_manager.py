@@ -6,6 +6,7 @@
 - создания и завершения задач
 - записи истории диалога внутри задачи
 - предотвращения двойного списания лимита
+- автопланирования напоминаний после успешного завершения
 """
 
 from __future__ import annotations
@@ -332,7 +333,72 @@ class TaskManager:
                 f"tech_fail={technical_failure}), лимит не списан"
             )
 
+        # Планируем напоминание, если задача успешно завершена
+        if should_charge and status == "done":
+            try:
+                await self._schedule_reminder_for_task(task_id, row)
+            except Exception as e:
+                logger.warning(f"Не удалось запланировать напоминание: {e}")
+
         return row
+
+    # --------------------------------------------------------
+    # ПЛАНИРОВАНИЕ НАПОМИНАНИЯ ПОСЛЕ ЗАВЕРШЕНИЯ ЗАДАЧИ
+    # --------------------------------------------------------
+    async def _schedule_reminder_for_task(
+        self,
+        task_id: int,
+        task: dict,
+    ) -> None:
+        """
+        Планирует напоминание после успешного завершения задачи.
+
+        Если у пользователя отключены напоминания — не планирует.
+        Если есть item_id — напоминание привязано к товару.
+        """
+        from app.services.scheduler import scheduler_service
+
+        user_id = task["user_id"]
+        item_id = task.get("item_id")
+
+        # Получаем пользователя
+        user = await db.fetch_one(
+            "SELECT telegram_id, timezone, reminder_interval_days FROM users WHERE id = %s",
+            (user_id,),
+        )
+        if not user:
+            return
+
+        interval_days = user.get("reminder_interval_days")
+        if interval_days is None:
+            logger.debug(f"Пользователь {user['telegram_id']}: напоминания отключены")
+            return
+
+        # Создаём запись в reminders
+        run_at = datetime.now(timezone.utc) + timedelta(days=interval_days)
+        reminder = await db.execute_returning(
+            """
+            INSERT INTO reminders (user_id, item_id, task_id, reminder_type, run_at, enabled)
+            VALUES (%s, %s, %s, 'follow_up', %s, TRUE)
+            RETURNING id
+            """,
+            (user_id, item_id, task_id, run_at),
+        )
+
+        if not reminder:
+            return
+
+        # Планируем в APScheduler
+        ok = scheduler_service.schedule_reminder(
+            reminder_id=reminder["id"],
+            user_telegram_id=user["telegram_id"],
+            user_timezone=user.get("timezone") or "Europe/Moscow",
+            item_id=item_id,
+            interval_days=interval_days,
+        )
+
+        if not ok:
+            logger.warning(f"Напоминание {reminder['id']} создано в БД, но не запланировано")
 
     # --------------------------------------------------------
     # ОТМЕНА АКТИВНЫХ ЗАДАЧ
@@ -409,9 +475,7 @@ class TaskManager:
         self,
         user: dict[str, Any],
     ) -> dict[str, Any]:
-        """
-        Возвращает статус лимита для показа пользователю.
-        """
+        """Возвращает статус лимита для показа пользователю."""
         user_id = user["id"]
         tariff = user["tariff"]
 

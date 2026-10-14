@@ -491,3 +491,24 @@ CREATE INDEX IF NOT EXISTS idx_usage_date
 CREATE INDEX IF NOT EXISTS idx_usage_task
     ON gigachat_usage(task_id)
     WHERE task_id IS NOT NULL;
+    -- ============================================================
+-- НАПОМИНАНИЯ — НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
+-- ============================================================
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS reminder_interval_days INTEGER DEFAULT 3;
+
+COMMENT ON COLUMN users.reminder_interval_days IS
+    'Интервал напоминаний в днях: 1, 3, 7 или NULL (отключено)';
+
+-- ============================================================
+-- APSCHEDULER: ХРАНИЛИЩЕ ЗАДАЧ
+-- ============================================================
+CREATE TABLE IF NOT EXISTS apscheduler_jobs (
+    id            VARCHAR(191) NOT NULL,
+    next_run_time DOUBLE PRECISION,
+    job_state     BYTEA NOT NULL,
+    CONSTRAINT apscheduler_jobs_pkey PRIMARY KEY (id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_apscheduler_jobs_next_run_time
+    ON apscheduler_jobs (next_run_time);
