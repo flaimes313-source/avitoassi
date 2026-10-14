@@ -2,12 +2,12 @@
 Настройки напоминаний (блок 10 ТЗ).
 
 Пользователь выбирает интервал: 1 / 3 / 7 дней или отключить.
+Из этого экрана возврат — в НАСТРОЙКИ, а не в главное меню.
 """
 
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from loguru import logger
 
@@ -15,14 +15,16 @@ from app.database import db
 from app.services.scheduler import scheduler_service
 from app.utils.keyboards import (
     CB,
-    back_to_menu,
+    back_to_settings,
     reminders_menu,
-    settings_menu,
 )
 
 router = Router(name="reminders")
 
 
+# ============================================================
+# ЭКРАН НАПОМИНАНИЙ
+# ============================================================
 @router.callback_query(F.data == CB.SET_REMINDERS)
 async def show_reminders_settings(
     callback: CallbackQuery,
@@ -41,7 +43,8 @@ async def show_reminders_settings(
     if enabled:
         text_lines.append(
             f"Сейчас: <b>каждые {interval} дн.</b> после завершения задачи.\n\n"
-            f"Я буду напоминать проверить, как идут дела, и предложу внести статистику."
+            f"Я буду напоминать проверить, как идут дела, и предложу внести статистику.\n\n"
+            f"<i>Напоминания приходят в 12:00 по твоему часовому поясу.</i>"
         )
     else:
         text_lines.append(
@@ -58,6 +61,9 @@ async def show_reminders_settings(
     await callback.answer()
 
 
+# ============================================================
+# УСТАНОВКА ИНТЕРВАЛА
+# ============================================================
 @router.callback_query(F.data == CB.REMIND_1D)
 async def set_1d(callback: CallbackQuery, user: dict) -> None:
     await _set_interval(callback, user, 1)
@@ -104,7 +110,7 @@ async def disable_reminders(callback: CallbackQuery, user: dict) -> None:
     await callback.message.edit_text(
         "🔕 <b>Напоминания отключены</b>\n\n"
         "Ты больше не будешь получать напоминания о товарах.",
-        reply_markup=back_to_menu(),
+        reply_markup=back_to_settings(),
     )
     await callback.answer("Отключено")
     logger.info(f"Пользователь {user['telegram_id']}: напоминания отключены")
@@ -126,12 +132,21 @@ async def _set_interval(
         (days, user["id"]),
     )
 
+    # Показываем обновлённый экран напоминаний с галочкой на выбранном интервале
+    interval = days
+    enabled = True
+
+    text_lines = [
+        "⏰ <b>Напоминания</b>\n",
+        f"Сейчас: <b>каждые {days} дн.</b> после завершения задачи.\n\n"
+        f"Я буду напоминать проверить, как идут дела, и предложу внести статистику.\n\n"
+        f"<i>Напоминания приходят в 12:00 по твоему часовому поясу.</i>\n",
+        "Выбери интервал:",
+    ]
+
     await callback.message.edit_text(
-        f"✅ <b>Напоминания включены</b>\n\n"
-        f"Интервал: <b>каждые {days} дн.</b> после завершения задачи.\n\n"
-        f"Я мягко напомню проверить, как идут дела, и предложу "
-        f"внести статистику для анализа.",
-        reply_markup=back_to_menu(),
+        "\n".join(text_lines),
+        reply_markup=reminders_menu(current_enabled=enabled, current_interval=interval),
     )
     await callback.answer(f"Установлено: {days} дн.")
     logger.info(f"Пользователь {user['telegram_id']}: напоминание через {days} дн.")

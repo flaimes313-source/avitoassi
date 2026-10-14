@@ -212,6 +212,14 @@ def back_to_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def back_to_settings() -> InlineKeyboardMarkup:
+    """Возврат в настройки (для разделов внутри настроек)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("🔙 К настройкам", CB.MENU_SETTINGS))
+    builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
+    return builder.as_markup()
+
+
 def cancel_and_back() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(btn("❌ Отменить", CB.CANCEL), btn("🏠 В меню", CB.MENU_MAIN))
@@ -445,6 +453,10 @@ def delete_data_confirm() -> InlineKeyboardMarkup:
 # НАПОМИНАНИЯ
 # ============================================================
 def reminders_menu(current_enabled: bool, current_interval: int | None) -> InlineKeyboardMarkup:
+    """
+    Клавиатура настроек напоминаний.
+    Кнопка «В меню» ведёт в НАСТРОЙКИ, а не в главное меню.
+    """
     def mark(text: str, val: int) -> str:
         return f"✅ {text}" if current_interval == val and current_enabled else text
 
@@ -456,6 +468,7 @@ def reminders_menu(current_enabled: bool, current_interval: int | None) -> Inlin
         "🔕 Отключить напоминания" if current_enabled else "🔔 Включить напоминания",
         CB.REMIND_OFF if current_enabled else CB.REMIND_3D,
     ))
+    builder.row(btn("🔙 К настройкам", CB.MENU_SETTINGS))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
