@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton
 from loguru import logger
 
 from app.database import db, to_jsonb
@@ -20,8 +22,8 @@ from app.services.gigachat_service import gigachat_service
 from app.utils.keyboards import (
     CB,
     MENU,
-    back_to_menu,
     cancel_and_back,
+    item_after_action,
     main_menu_reply,
 )
 
@@ -33,7 +35,6 @@ class ItemsStates(StatesGroup):
     viewing_item = State()
     entering_stats = State()
     entering_price = State()
-    entering_text = State()
     analyzing = State()
 
 
@@ -45,7 +46,6 @@ def _btn(text: str, callback: str) -> InlineKeyboardButton:
 # УТИЛИТЫ
 # ============================================================
 async def _get_user_items(user_id: int) -> list[dict]:
-    """Возвращает список товаров пользователя с последней статистикой."""
     return await db.fetch_all(
         """
         SELECT
@@ -62,14 +62,100 @@ async def _get_user_items(user_id: int) -> list[dict]:
 
 
 async def _get_item_detail(item_id: int, user_id: int) -> dict | None:
-    """Возвращает товар с проверкой владельца."""
     return await db.fetch_one(
-        """
-        SELECT * FROM items
-        WHERE id = %s AND user_id = %s
-        """,
+        "SELECT * FROM items WHERE id = %s AND user_id = %s",
         (item_id, user_id),
     )
+
+
+def _extract_int(text: str, keywords: list[str]) -> int | None:
+    """Извлекает целое число после одного из ключевых слов."""
+    for kw in keywords:
+        pattern = rf"{kw}[а-я]*\D{{0,15}}(\d+)"
+        m = re.search(pattern, text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+async def _show_item_card(
+    message: Message,
+    user: dict,
+    item_id: int,
+    state: FSMContext,
+) -> None:
+    """Отправляет карточку товара сообщением."""
+    item = await _get_item_detail(item_id, user["id"])
+    if not item:
+        await message.answer("Товар не найден.")
+        return
+
+    listings = await db.fetch_all(
+        "SELECT * FROM listings WHERE item_id = %s ORDER BY created_at DESC",
+        (item_id,),
+    )
+    stats = await db.fetch_all(
+        "SELECT * FROM stats_entries WHERE item_id = %s ORDER BY created_at DESC LIMIT 10",
+        (item_id,),
+    )
+    price_history = item.get("price_history") or []
+
+    lines = [f"📦 <b>{item['name']}</b>\n"]
+
+    status_label = {"active": "🟢 В продаже", "sold": "✅ Продано", "archived": "📦 В архиве"}.get(
+        item["status"], item["status"]
+    )
+    lines.append(f"Статус: {status_label}")
+
+    if item.get("current_price"):
+        lines.append(f"Цена: <b>{item['current_price']} ₽</b>")
+
+    if item.get("sale_reason"):
+        lines.append(f"Причина продажи: {item['sale_reason']}")
+
+    lines.append(f"Создан: {item['created_at'].strftime('%d.%m.%Y')}")
+
+    if listings:
+        lines.append(f"\n<b>Версий текста:</b> {len(listings)}")
+        for i, l in enumerate(listings[:3], 1):
+            marker = " ←" if l.get("is_selected") else ""
+            lines.append(f"{i}. [{l['approach']}] {l['title'][:40]}{marker}")
+
+    if stats:
+        last = stats[0]
+        lines.append(f"\n<b>Последняя статистика</b> ({last['created_at'].strftime('%d.%m.%Y')}):")
+        parts = []
+        if last.get("views") is not None:
+            parts.append(f"👁 {last['views']}")
+        if last.get("favorites") is not None:
+            parts.append(f"⭐ {last['favorites']}")
+        if last.get("messages") is not None:
+            parts.append(f"💬 {last['messages']}")
+        lines.append(" · ".join(parts) if parts else "нет данных")
+    else:
+        lines.append("\n<b>Статистика:</b> пока не вводилась")
+
+    if price_history:
+        lines.append(f"\n<b>История цены:</b> {len(price_history)} изменений")
+
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("📊 Ввести статистику", f"item:stats:{item_id}"))
+    builder.row(_btn("💰 Изменить цену", f"item:price:{item_id}"))
+    builder.row(_btn("📝 Показать текст", f"item:text:{item_id}"))
+    builder.row(_btn("🔄 Сменить версию текста", f"item:switch:{item_id}"))
+
+    if item["status"] == "active":
+        builder.row(_btn("✅ Пометить как «продано»", f"item:sold:{item_id}"))
+
+    builder.row(_btn("🤖 Получить рекомендацию", f"item:advice:{item_id}"))
+    builder.row(_btn("🔙 К списку", CB.MENU_ITEMS))
+
+    await state.set_state(ItemsStates.viewing_item)
+    await state.update_data(item_id=item_id)
+
+    await message.answer(text, reply_markup=builder.as_markup())
 
 
 # ============================================================
@@ -140,84 +226,8 @@ async def view_item(
     item_id = int(callback.data.split(":")[2])
     logger.info(f"view_item: item_id={item_id}")
 
-    item = await _get_item_detail(item_id, user["id"])
-    if not item:
-        await callback.answer("Товар не найден.", show_alert=True)
-        return
-
-    # Собираем данные
-    listings = await db.fetch_all(
-        "SELECT * FROM listings WHERE item_id = %s ORDER BY created_at DESC",
-        (item_id,),
-    )
-    stats = await db.fetch_all(
-        "SELECT * FROM stats_entries WHERE item_id = %s ORDER BY created_at DESC LIMIT 10",
-        (item_id,),
-    )
-    price_history = item.get("price_history") or []
-
-    # Формируем карточку
-    lines = [f"📦 <b>{item['name']}</b>\n"]
-
-    status_label = {"active": "🟢 В продаже", "sold": "✅ Продано", "archived": "📦 В архиве"}.get(
-        item["status"], item["status"]
-    )
-    lines.append(f"Статус: {status_label}")
-
-    if item.get("current_price"):
-        lines.append(f"Цена: <b>{item['current_price']} ₽</b>")
-
-    if item.get("sale_reason"):
-        lines.append(f"Причина продажи: {item['sale_reason']}")
-
-    lines.append(f"Создан: {item['created_at'].strftime('%d.%m.%Y')}")
-
-    # Версии текста
-    if listings:
-        lines.append(f"\n<b>Версий текста:</b> {len(listings)}")
-        for i, l in enumerate(listings[:3], 1):
-            marker = " ←" if l.get("is_selected") else ""
-            lines.append(f"{i}. [{l['approach']}] {l['title'][:40]}{marker}")
-
-    # Статистика
-    if stats:
-        last = stats[0]
-        lines.append(f"\n<b>Последняя статистика</b> ({last['created_at'].strftime('%d.%m.%Y')}):")
-        parts = []
-        if last.get("views") is not None:
-            parts.append(f"👁 {last['views']}")
-        if last.get("favorites") is not None:
-            parts.append(f"⭐ {last['favorites']}")
-        if last.get("messages") is not None:
-            parts.append(f"💬 {last['messages']}")
-        lines.append(" · ".join(parts) if parts else "нет данных")
-    else:
-        lines.append("\n<b>Статистика:</b> пока не вводилась")
-
-    # История цены
-    if price_history:
-        lines.append(f"\n<b>История цены:</b> {len(price_history)} изменений")
-
-    text = "\n".join(lines)
-
-    # Клавиатура
-    builder = InlineKeyboardBuilder()
-    builder.row(_btn("📊 Ввести статистику", f"item:stats:{item_id}"))
-    builder.row(_btn("💰 Изменить цену", f"item:price:{item_id}"))
-    builder.row(_btn("📝 Показать текст", f"item:text:{item_id}"))
-    builder.row(_btn("🔄 Сменить версию текста", f"item:switch:{item_id}"))
-
-    if item["status"] == "active":
-        builder.row(_btn("✅ Пометить как «продано»", f"item:sold:{item_id}"))
-
-    builder.row(_btn("🤖 Получить рекомендацию", f"item:advice:{item_id}"))
-    builder.row(_btn("🔙 К списку", CB.MENU_ITEMS))
-
-    await state.set_state(ItemsStates.viewing_item)
-    await state.update_data(item_id=item_id)
-
-    await callback.message.answer(text, reply_markup=builder.as_markup())
     await callback.answer()
+    await _show_item_card(callback.message, user, item_id, state)
 
 
 # ============================================================
@@ -244,7 +254,8 @@ async def show_text(
         return
 
     await callback.message.answer(
-        f"📝 <b>{listing['title']}</b>\n\n{listing['body']}"
+        f"📝 <b>{listing['title']}</b>\n\n{listing['body']}",
+        reply_markup=item_after_action(item_id),
     )
     await callback.answer()
 
@@ -294,12 +305,10 @@ async def set_version(
     item_id = int(parts[2])
     listing_id = int(parts[3])
 
-    # Снимаем выбор со всех версий этого товара
     await db.execute(
         "UPDATE listings SET is_selected = FALSE WHERE item_id = %s",
         (item_id,),
     )
-    # Ставим выбранную
     await db.execute(
         "UPDATE listings SET is_selected = TRUE WHERE id = %s",
         (listing_id,),
@@ -307,17 +316,7 @@ async def set_version(
 
     await callback.answer("Версия выбрана")
     await callback.message.answer("✅ Версия текста обновлена.")
-    # Возвращаемся к карточке
-    await view_item(
-        CallbackQuery(
-            id=callback.id,
-            from_user=callback.from_user,
-            chat_instance=callback.chat_instance,
-            data=f"item:view:{item_id}",
-            message=callback.message,
-        ),
-        state, user,
-    )
+    await _show_item_card(callback.message, user, item_id, state)
 
 
 # ============================================================
@@ -352,9 +351,6 @@ async def on_stats_input(
 ) -> None:
     text = (message.text or "").strip().lower()
 
-    # Парсим статистику
-    import re
-
     views = _extract_int(text, ["просмотр"])
     favorites = _extract_int(text, ["избранн"])
     messages_cnt = _extract_int(text, ["сообщени"])
@@ -385,7 +381,6 @@ async def on_stats_input(
         await state.clear()
         return
 
-    # Сохраняем
     await db.execute(
         """
         INSERT INTO stats_entries (
@@ -400,14 +395,12 @@ async def on_stats_input(
         ),
     )
 
-    # Если продано — обновляем статус товара
     if outcome == "sold":
         await db.execute(
             "UPDATE items SET status = 'sold' WHERE id = %s",
             (item_id,),
         )
 
-    # Формируем подтверждение
     parts = []
     if views is not None:
         parts.append(f"просмотры: {views}")
@@ -422,19 +415,8 @@ async def on_stats_input(
 
     await message.answer(
         f"✅ <b>Статистика сохранена:</b>\n" + "\n".join(f"• {p}" for p in parts),
-        reply_markup=back_to_menu(),
+        reply_markup=item_after_action(item_id),
     )
-
-
-def _extract_int(text: str, keywords: list[str]) -> int | None:
-    """Извлекает целое число после одного из ключевых слов."""
-    import re
-    for kw in keywords:
-        pattern = rf"{kw}[а-я]*\D{{0,15}}(\d+)"
-        m = re.search(pattern, text)
-        if m:
-            return int(m.group(1))
-    return None
 
 
 # ============================================================
@@ -466,8 +448,6 @@ async def on_price_input(
 ) -> None:
     text = (message.text or "").strip()
 
-    # Парсим цену
-    import re
     m = re.search(r"\d[\d\s]*", text)
     if not m:
         await message.answer("🤔 Не вижу числа. Пришли цену, например: <code>55000</code>")
@@ -492,7 +472,6 @@ async def on_price_input(
     old_price = item.get("current_price")
     price_history = item.get("price_history") or []
 
-    from datetime import datetime, timezone
     price_history.append({
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "price": new_price,
@@ -517,7 +496,7 @@ async def on_price_input(
     if reason:
         msg += f"\n<i>Причина: {reason}</i>"
 
-    await message.answer(msg, reply_markup=back_to_menu())
+    await message.answer(msg, reply_markup=item_after_action(item_id))
 
 
 # ============================================================
@@ -540,7 +519,6 @@ async def mark_sold(
         (item_id,),
     )
 
-    # Записываем в статистику
     await db.execute(
         """
         INSERT INTO stats_entries (item_id, user_id, outcome, price_at_entry, source)
@@ -552,7 +530,7 @@ async def mark_sold(
     await callback.answer("✅ Продано!")
     await callback.message.answer(
         "🎉 <b>Поздравляю с продажей!</b>\n\nТовар помечен как проданный.",
-        reply_markup=back_to_menu(),
+        reply_markup=item_after_action(item_id),
     )
 
 
@@ -600,11 +578,10 @@ async def get_advice(
         logger.exception(f"Ошибка анализа: {e}")
         await callback.message.answer(
             "❌ Не удалось проанализировать. Попробуй позже.",
-            reply_markup=back_to_menu(),
+            reply_markup=item_after_action(item_id),
         )
         return
 
-    # Формируем ответ
     lines = ["🤖 <b>Рекомендация</b>\n"]
 
     if summary := result.get("summary"):
@@ -633,7 +610,10 @@ async def get_advice(
     if result.get("insufficient_data"):
         lines.append("\n⚠️ <i>Данных мало для точных выводов. Введи ещё статистику через 2-3 дня.</i>")
 
-    await callback.message.answer("\n".join(lines), reply_markup=back_to_menu())
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=item_after_action(item_id),
+    )
 
 
 # ============================================================
@@ -645,13 +625,24 @@ async def cancel_items(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
+    data = await state.get_data()
+    item_id = data.get("item_id")
+
     await state.clear()
+
     try:
         await callback.message.edit_text("❌ Отменено.")
     except Exception:
         pass
-    await callback.message.answer(
-        "Возвращаю в главное меню.",
-        reply_markup=main_menu_reply(),
-    )
+
+    if item_id:
+        await callback.message.answer(
+            "Возвращаю к карточке товара.",
+            reply_markup=item_after_action(item_id),
+        )
+    else:
+        await callback.message.answer(
+            "Возвращаю в главное меню.",
+            reply_markup=main_menu_reply(),
+        )
     await callback.answer("Отменено")

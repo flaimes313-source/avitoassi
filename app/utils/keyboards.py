@@ -314,7 +314,6 @@ def listing_after_edit() -> InlineKeyboardMarkup:
 # УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ (блок 4)
 # ============================================================
 def improve_materials() -> InlineKeyboardMarkup:
-    """Клавиатура сбора материалов для улучшения объявления."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("📝 Добавить текст", CB.IMPROVE_MATERIAL_TEXT))
     builder.row(btn("🔗 Добавить ссылку", CB.IMPROVE_MATERIAL_LINK))
@@ -326,7 +325,6 @@ def improve_materials() -> InlineKeyboardMarkup:
 
 
 def improve_problems() -> InlineKeyboardMarkup:
-    """Выбор проблемы для анализа."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("👁 Мало просмотров", CB.IMPROVE_PROBLEM_LOW_VIEWS))
     builder.row(btn("⭐ Мало избранного", CB.IMPROVE_PROBLEM_NO_FAVORITES))
@@ -384,6 +382,18 @@ def buyer_reply_goals() -> InlineKeyboardMarkup:
     builder.row(btn("🔔 Напомнить о себе", CB.REPLY_GOAL_REMIND))
     builder.row(btn("🚫 Вежливо отказать", CB.REPLY_GOAL_REFUSE))
     builder.row(btn("⏭ Без цели", CB.REPLY_GOAL_NONE))
+    return builder.as_markup()
+
+
+# ============================================================
+# КАРТОЧКА ТОВАРА (блок 9) — возврат к товару после действия
+# ============================================================
+def item_after_action(item_id: int) -> InlineKeyboardMarkup:
+    """Кнопки после действия с товаром — вернуться к карточке."""
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("🔙 К карточке товара", f"item:view:{item_id}"))
+    builder.row(btn("📂 К списку товаров", CB.MENU_ITEMS))
+    builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
     return builder.as_markup()
 
 
