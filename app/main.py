@@ -110,17 +110,22 @@ _setup_dispatcher()
 async def lifespan(app: FastAPI):
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
 
+    # --- БД ---
     try:
         await db.connect()
     except Exception as e:
-        logger.error(f"Не удалось подключиться к БД на старте: {e}")
+        logger.exception(f"❌ Не удалось подключиться к БД на старте: {e}")
 
+    # --- Scheduler ---
     try:
         from app.services.scheduler import scheduler_service
+        logger.info("🔧 Запуск scheduler...")
         await scheduler_service.start()
+        logger.success(f"✅ Scheduler запущен: {scheduler_service._scheduler is not None}")
     except Exception as e:
-        logger.error(f"Не удалось запустить scheduler: {e}")
+        logger.exception(f"❌ Не удалось запустить scheduler: {e}")
 
+    # --- Webhook ---
     try:
         if settings.bot_mode == "webhook":
             await bot.set_webhook(
@@ -139,6 +144,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # --- Остановка ---
     logger.info("Остановка приложения...")
 
     try:

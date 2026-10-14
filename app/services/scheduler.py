@@ -28,6 +28,27 @@ from loguru import logger
 from app.config import settings
 
 
+def _build_sqlalchemy_url(db_url: str) -> str:
+    """
+    Преобразует psycopg3-URL в SQLAlchemy-совместимый.
+
+    SQLAlchemy с драйвером psycopg (v3) ожидает схему
+    postgresql+psycopg://.
+
+    Мы используем psycopg3, поэтому по умолчанию ставим +psycopg.
+    """
+    if db_url.startswith("postgresql+psycopg://"):
+        return db_url
+
+    if db_url.startswith("postgresql://"):
+        return db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    if db_url.startswith("postgres://"):
+        return db_url.replace("postgres://", "postgresql+psycopg://", 1)
+
+    return db_url
+
+
 class SchedulerService:
     """Обёртка над APScheduler."""
 
@@ -40,14 +61,11 @@ class SchedulerService:
             logger.warning("Scheduler уже запущен")
             return
 
-        # Конвертируем asyncpg URL для SQLAlchemy
-        # (psycopg2-совместимый URL)
-        db_url = settings.database_url
-        # SQLAlchemy ожидает postgresql:// (без +asyncpg)
-        if db_url.startswith("postgresql://"):
-            sqlalchemy_url = db_url
-        else:
-            sqlalchemy_url = db_url.replace("postgres://", "postgresql://")
+        sqlalchemy_url = _build_sqlalchemy_url(settings.database_url)
+
+        # Логируем URL без пароля (маскируем всё после @)
+        safe_url = sqlalchemy_url.split("@")[-1] if "@" in sqlalchemy_url else "?"
+        logger.info(f"SQLAlchemy URL (без пароля): ***@{safe_url}")
 
         jobstores = {
             "default": SQLAlchemyJobStore(url=sqlalchemy_url)
@@ -81,7 +99,6 @@ class SchedulerService:
     ) -> bool:
         """
         Планирует напоминание через N дней.
-
         Возвращает True, если удалось запланировать.
         """
         if self._scheduler is None:
@@ -101,7 +118,7 @@ class SchedulerService:
         )
         target_utc = target_local.astimezone(timezone.utc)
 
-        # Если уже прошло — сдвигаем на завтра
+        # Если уже прошло — сдвигаем на 5 минут вперёд
         if target_utc <= datetime.now(timezone.utc):
             target_utc = datetime.now(timezone.utc) + timedelta(minutes=5)
 
@@ -165,7 +182,6 @@ async def _send_reminder_job(
 
     logger.info(f"Отправка напоминания id={reminder_id} → {user_telegram_id}")
 
-    # Получаем данные напоминания
     try:
         reminder = await db.fetch_one(
             "SELECT * FROM reminders WHERE id = %s",
@@ -175,7 +191,6 @@ async def _send_reminder_job(
             logger.warning(f"Напоминание {reminder_id} не найдено в БД")
             return
 
-        # Проверяем, включено ли ещё
         if not reminder.get("enabled", True):
             logger.info(f"Напоминание {reminder_id} отключено пользователем")
             return
