@@ -84,7 +84,7 @@ class YooKassaService:
                         "product": "pro",
                         "days": duration,
                     },
-                    "receipt": None,  # без чека
+                    
                 },
                 idempotency_key,
             )
