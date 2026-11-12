@@ -2,16 +2,9 @@
 Планировщик напоминаний на APScheduler.
 
 Задачи:
-- Планировать напоминания через 1/3/7 дней после создания/завершения задачи
-- Отправлять напоминания в указанное время
+- Планировать напоминания через 1/3/7 дней после завершения задачи
+- Ежедневная проверка истекающих PRO (за 1 день)
 - Сохранять задачи в PostgreSQL (переживают перезапуск BotHost)
-- После напоминания предлагать внести статистику
-
-Использование:
-    from app.services.scheduler import scheduler_service
-    await scheduler_service.start()           # при старте приложения
-    await scheduler_service.stop()            # при остановке
-    scheduler_service.schedule_reminder(...)  # при создании задачи
 """
 
 from __future__ import annotations
@@ -22,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from loguru import logger
 
@@ -29,23 +23,13 @@ from app.config import settings
 
 
 def _build_sqlalchemy_url(db_url: str) -> str:
-    """
-    Преобразует psycopg3-URL в SQLAlchemy-совместимый.
-
-    SQLAlchemy с драйвером psycopg (v3) ожидает схему
-    postgresql+psycopg://.
-
-    Мы используем psycopg3, поэтому по умолчанию ставим +psycopg.
-    """
+    """Преобразует psycopg3-URL в SQLAlchemy-совместимый (+psycopg)."""
     if db_url.startswith("postgresql+psycopg://"):
         return db_url
-
     if db_url.startswith("postgresql://"):
         return db_url.replace("postgresql://", "postgresql+psycopg://", 1)
-
     if db_url.startswith("postgres://"):
         return db_url.replace("postgres://", "postgresql+psycopg://", 1)
-
     return db_url
 
 
@@ -62,8 +46,6 @@ class SchedulerService:
             return
 
         sqlalchemy_url = _build_sqlalchemy_url(settings.database_url)
-
-        # Логируем URL без пароля (маскируем всё после @)
         safe_url = sqlalchemy_url.split("@")[-1] if "@" in sqlalchemy_url else "?"
         logger.info(f"SQLAlchemy URL (без пароля): ***@{safe_url}")
 
@@ -86,7 +68,7 @@ class SchedulerService:
             logger.info("Scheduler остановлен")
 
     # --------------------------------------------------------
-    # ПЛАНИРОВАНИЕ НАПОМИНАНИЯ
+    # НАПОМИНАНИЯ ПО ЗАДАЧАМ
     # --------------------------------------------------------
     def schedule_reminder(
         self,
@@ -97,15 +79,11 @@ class SchedulerService:
         interval_days: int = 3,
         custom_text: str | None = None,
     ) -> bool:
-        """
-        Планирует напоминание через N дней.
-        Возвращает True, если удалось запланировать.
-        """
+        """Планирует напоминание через N дней."""
         if self._scheduler is None:
             logger.warning("Scheduler не запущен, напоминание не запланировано")
             return False
 
-        # Время срабатывания — через N дней, в 12:00 по часовому поясу пользователя
         try:
             tz = ZoneInfo(user_timezone)
         except Exception:
@@ -118,7 +96,6 @@ class SchedulerService:
         )
         target_utc = target_local.astimezone(timezone.utc)
 
-        # Если уже прошло — сдвигаем на 5 минут вперёд
         if target_utc <= datetime.now(timezone.utc):
             target_utc = datetime.now(timezone.utc) + timedelta(minutes=5)
 
@@ -161,6 +138,27 @@ class SchedulerService:
             logger.debug(f"Не удалось отменить напоминание: {e}")
             return False
 
+    # --------------------------------------------------------
+    # ЕЖЕДНЕВНАЯ ПРОВЕРКА PRO
+    # --------------------------------------------------------
+    def schedule_daily_pro_check(self) -> None:
+        """Планирует ежедневную проверку PRO (10:00 UTC)."""
+        if self._scheduler is None:
+            logger.warning("Scheduler не запущен, ежедневная проверка PRO не запланирована")
+            return
+
+        try:
+            self._scheduler.add_job(
+                _check_expiring_pro_job,
+                trigger=CronTrigger(hour=10, minute=0),
+                id="daily_pro_check",
+                name="Daily PRO check",
+                replace_existing=True,
+            )
+            logger.info("Ежедневная проверка PRO запланирована (10:00 UTC)")
+        except Exception as e:
+            logger.exception(f"Не удалось запланировать проверку PRO: {e}")
+
 
 # ============================================================
 # JOB: ОТПРАВКА НАПОМИНАНИЯ
@@ -171,10 +169,7 @@ async def _send_reminder_job(
     item_id: int | None,
     custom_text: str | None,
 ) -> None:
-    """
-    Отправляет напоминание пользователю.
-    Вызывается APScheduler'ом.
-    """
+    """Отправляет напоминание пользователю."""
     from app.main import bot
     from app.database import db
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -195,7 +190,6 @@ async def _send_reminder_job(
             logger.info(f"Напоминание {reminder_id} отключено пользователем")
             return
 
-        # Формируем текст
         if custom_text:
             text = custom_text
         elif item_id:
@@ -215,7 +209,6 @@ async def _send_reminder_job(
                 "Проверь, как идут дела с твоим объявлением."
             )
 
-        # Клавиатура
         builder = InlineKeyboardBuilder()
         if item_id:
             builder.row(InlineKeyboardButton(
@@ -235,14 +228,12 @@ async def _send_reminder_job(
             callback_data="menu:main",
         ))
 
-        # Отправляем
         await bot.send_message(
             chat_id=user_telegram_id,
             text=text,
             reply_markup=builder.as_markup(),
         )
 
-        # Помечаем как отправленное
         await db.execute(
             "UPDATE reminders SET sent_at = NOW() WHERE id = %s",
             (reminder_id,),
@@ -252,6 +243,78 @@ async def _send_reminder_job(
 
     except Exception as e:
         logger.exception(f"Ошибка отправки напоминания {reminder_id}: {e}")
+
+
+# ============================================================
+# JOB: ЕЖЕДНЕВНАЯ ПРОВЕРКА ИСТЕКАЮЩИХ PRO
+# ============================================================
+async def _check_expiring_pro_job() -> None:
+    """
+    Находит пользователей, у которых PRO истекает завтра,
+    и отправляет предупреждение.
+    """
+    from app.main import bot
+    from app.database import db
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+
+    logger.info("Проверка истекающих PRO-подписок...")
+
+    try:
+        users = await db.fetch_all(
+            """
+            SELECT telegram_id, first_name, pro_expires_at
+            FROM users
+            WHERE tariff = 'pro'
+              AND pro_expires_at IS NOT NULL
+              AND pro_expires_at BETWEEN NOW() AND NOW() + INTERVAL '2 days'
+            """
+        )
+
+        sent_count = 0
+        for u in users:
+            try:
+                expires = u["pro_expires_at"]
+                days_left = (expires - datetime.now(timezone.utc)).days
+
+                if days_left > 1:
+                    continue
+
+                builder = InlineKeyboardBuilder()
+                builder.row(InlineKeyboardButton(
+                    text="💳 Продлить PRO",
+                    callback_data="sub:show_pro",
+                ))
+                builder.row(InlineKeyboardButton(
+                    text="🏠 В главное меню",
+                    callback_data="menu:main",
+                ))
+
+                await bot.send_message(
+                    chat_id=u["telegram_id"],
+                    text=(
+                        f"⏰ <b>PRO заканчивается через 1 день</b>\n\n"
+                        f"Дата окончания: <b>{expires.strftime('%d.%m.%Y')}</b>\n\n"
+                        f"После окончания ты вернёшься на Free "
+                        f"(3 задачи в месяц).\n\n"
+                        f"Продли подписку, чтобы сохранить безлимит."
+                    ),
+                    reply_markup=builder.as_markup(),
+                )
+                sent_count += 1
+                logger.info(
+                    f"Отправлено уведомление об окончании PRO "
+                    f"user={u['telegram_id']}, {days_left} дн."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Не удалось уведомить {u['telegram_id']}: {e}"
+                )
+
+        logger.info(f"Проверка PRO завершена: отправлено {sent_count} уведомлений")
+
+    except Exception as e:
+        logger.exception(f"Ошибка в ежедневной проверке PRO: {e}")
 
 
 # ============================================================

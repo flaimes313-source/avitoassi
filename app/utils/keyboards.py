@@ -137,6 +137,7 @@ class CB:
     ADMIN_TICKETS = "admin:tickets"
     ADMIN_STATS = "admin:stats"
     ADMIN_WHITELIST = "admin:whitelist"
+    ADMIN_PRO_USERS = "admin:pro_users"
 
 
 # ============================================================
@@ -155,7 +156,6 @@ class MENU:
 
     @classmethod
     def all_texts(cls) -> set[str]:
-        """Множество всех текстов меню — для фильтра-исключения."""
         return {
             cls.CREATE, cls.IMPROVE, cls.COMPETITORS,
             cls.PHOTOS, cls.STRATEGY, cls.BUYER_REPLIES,
@@ -175,7 +175,7 @@ def btn_url(text: str, url: str) -> InlineKeyboardButton:
 
 
 # ============================================================
-# ГЛАВНОЕ МЕНЮ (2 кнопки в ряд)
+# ГЛАВНОЕ МЕНЮ
 # ============================================================
 def main_menu_reply() -> ReplyKeyboardMarkup:
     kb = [
@@ -213,7 +213,6 @@ def back_to_menu() -> InlineKeyboardMarkup:
 
 
 def back_to_settings() -> InlineKeyboardMarkup:
-    """Возврат в настройки (для разделов внутри настроек)."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("🔙 К настройкам", CB.MENU_SETTINGS))
     builder.row(btn("🏠 В главное меню", CB.MENU_MAIN))
@@ -254,7 +253,7 @@ def onboarding_privacy() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# СОЗДАНИЕ ОБЪЯВЛЕНИЯ (блок 3)
+# СОЗДАНИЕ ОБЪЯВЛЕНИЯ
 # ============================================================
 def create_listing_start() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -277,14 +276,6 @@ def create_listing_ready() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(btn("⚡ Сгенерировать", CB.CREATE_GENERATE))
     builder.row(btn("📸 Ещё фото", CB.CREATE_ADD_PHOTO), btn("✏️ Ещё текст", CB.CREATE_ADD_TEXT))
-    builder.row(btn("❌ Отменить", CB.CANCEL))
-    return builder.as_markup()
-
-
-def create_listing_question() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(btn("🤷 Не знаю", CB.DONT_KNOW), btn("⏭ Пропустить", CB.SKIP))
-    builder.row(btn("⚡ Хватит вопросов", CB.CREATE_PROCEED_AS_IS))
     builder.row(btn("❌ Отменить", CB.CANCEL))
     return builder.as_markup()
 
@@ -319,7 +310,7 @@ def listing_after_edit() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ (блок 4)
+# УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ
 # ============================================================
 def improve_materials() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -345,7 +336,7 @@ def improve_problems() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# АНАЛИЗ КОНКУРЕНТОВ (блок 5)
+# АНАЛИЗ КОНКУРЕНТОВ
 # ============================================================
 def competitors_collect() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -356,7 +347,7 @@ def competitors_collect() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# ФОТО (блок 6)
+# ФОТО
 # ============================================================
 def photos_actions() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -368,7 +359,7 @@ def photos_actions() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# СТРАТЕГИЯ (блок 7)
+# СТРАТЕГИЯ
 # ============================================================
 def strategy_actions() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -379,7 +370,7 @@ def strategy_actions() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# ОТВЕТЫ ПОКУПАТЕЛЯМ (блок 8)
+# ОТВЕТЫ ПОКУПАТЕЛЯМ
 # ============================================================
 def buyer_reply_goals() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -394,10 +385,9 @@ def buyer_reply_goals() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# КАРТОЧКА ТОВАРА (блок 9) — возврат к товару после действия
+# КАРТОЧКА ТОВАРА
 # ============================================================
 def item_after_action(item_id: int) -> InlineKeyboardMarkup:
-    """Кнопки после действия с товаром — вернуться к карточке."""
     builder = InlineKeyboardBuilder()
     builder.row(btn("🔙 К карточке товара", f"item:view:{item_id}"))
     builder.row(btn("📂 К списку товаров", CB.MENU_ITEMS))
@@ -453,10 +443,6 @@ def delete_data_confirm() -> InlineKeyboardMarkup:
 # НАПОМИНАНИЯ
 # ============================================================
 def reminders_menu(current_enabled: bool, current_interval: int | None) -> InlineKeyboardMarkup:
-    """
-    Клавиатура настроек напоминаний.
-    Кнопка «В меню» ведёт в НАСТРОЙКИ, а не в главное меню.
-    """
     def mark(text: str, val: int) -> str:
         return f"✅ {text}" if current_interval == val and current_enabled else text
 
@@ -490,6 +476,7 @@ def support_menu() -> InlineKeyboardMarkup:
 def admin_panel() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(btn("🎁 Белый список", CB.ADMIN_WHITELIST))
+    builder.row(btn("⭐ PRO-пользователи", CB.ADMIN_PRO_USERS))
     builder.row(btn("🎫 Тикеты поддержки", CB.ADMIN_TICKETS))
     builder.row(btn("📢 Рассылка", CB.ADMIN_BROADCAST))
     builder.row(btn("📊 Статистика", CB.ADMIN_STATS))

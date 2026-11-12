@@ -34,11 +34,7 @@ dp = Dispatcher(storage=MemoryStorage())
 # РЕГИСТРАЦИЯ РОУТЕРОВ И MIDDLEWARES
 # ============================================================
 def _setup_dispatcher() -> None:
-    """
-    Подключает роутеры и middlewares.
-    Вызывается один раз при импорте app.main.
-    """
-    # --- Роутеры ---
+    """Подключает роутеры и middlewares."""
     from app.handlers import (
         admin,
         buyer_replies,
@@ -83,7 +79,6 @@ def _setup_dispatcher() -> None:
                 continue
             raise
 
-    # --- Middlewares ---
     from app.middlewares.subscription import SubscriptionMiddleware
     from app.middlewares.task_context import TaskContextMiddleware
     from app.middlewares.throttling import ThrottlingMiddleware
@@ -110,22 +105,22 @@ _setup_dispatcher()
 async def lifespan(app: FastAPI):
     logger.info(f"Запуск в режиме: {settings.bot_mode} | окружение: {settings.environment}")
 
-    # --- БД ---
     try:
         await db.connect()
     except Exception as e:
         logger.exception(f"❌ Не удалось подключиться к БД на старте: {e}")
 
-    # --- Scheduler ---
     try:
         from app.services.scheduler import scheduler_service
         logger.info("🔧 Запуск scheduler...")
         await scheduler_service.start()
         logger.success(f"✅ Scheduler запущен: {scheduler_service._scheduler is not None}")
+
+        # Ежедневная проверка истекающих PRO
+        scheduler_service.schedule_daily_pro_check()
     except Exception as e:
         logger.exception(f"❌ Не удалось запустить scheduler: {e}")
 
-    # --- Webhook ---
     try:
         if settings.bot_mode == "webhook":
             await bot.set_webhook(
@@ -144,7 +139,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # --- Остановка ---
     logger.info("Остановка приложения...")
 
     try:
@@ -230,10 +224,6 @@ async def yookassa_webhook(request: Request) -> Response:
 # ЗАПУСК НА BOTHOST И ЛОКАЛЬНО
 # ============================================================
 if __name__ == "__main__":
-    # BotHost запускает `python -m app.main`.
-    # Здесь мы сами поднимаем uvicorn.
-    # Передаём ОБЪЕКТ `app`, а не строку "app.main:app" —
-    # это исключает повторный импорт модуля.
     if settings.bot_mode == "polling":
         logger.info("Запуск long polling...")
         asyncio.run(dp.start_polling(bot, skip_updates=True))

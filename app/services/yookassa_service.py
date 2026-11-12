@@ -7,6 +7,7 @@
 - Обработка webhook от ЮKassa
 - Активация PRO после подтверждённой оплаты
 - Защита от повторной обработки (idempotency_key)
+- Уведомление админа при покупке
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ class YooKassaService:
     """Обёртка над SDK ЮKassa."""
 
     def __init__(self) -> None:
-        # Настраиваем SDK при инициализации
         Configuration.account_id = settings.yookassa_shop_id
         Configuration.secret_key = settings.yookassa_secret_key
         logger.info(
@@ -44,24 +44,11 @@ class YooKassaService:
         user: dict,
         return_url: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Создаёт платёж PRO на 30 дней.
-
-        Возвращает:
-        {
-            "payment_id": "...",
-            "confirmation_url": "https://yoomoney.ru/checkout/...",
-            "amount": 490.00,
-            "currency": "RUB",
-        }
-
-        Или выбрасывает исключение.
-        """
+        """Создаёт платёж PRO на 30 дней."""
         amount = float(settings.pro_price_rub)
         duration = settings.pro_duration_days
 
         idempotency_key = str(uuid.uuid4())
-
         description = f"PRO на {duration} дней"
         return_url = return_url or settings.yookassa_return_url
 
@@ -84,7 +71,6 @@ class YooKassaService:
                         "product": "pro",
                         "days": duration,
                     },
-                    
                 },
                 idempotency_key,
             )
@@ -94,7 +80,6 @@ class YooKassaService:
                 f"для user={user['telegram_id']} на {amount} ₽"
             )
 
-            # Сохраняем в БД
             await db.execute(
                 """
                 INSERT INTO payments (
@@ -129,10 +114,7 @@ class YooKassaService:
     # ПРОВЕРКА СТАТУСА (SERVER-SIDE)
     # --------------------------------------------------------
     async def check_payment_status(self, payment_id: str) -> dict[str, Any]:
-        """
-        Проверяет статус платежа через API ЮKassa.
-        Это НАДЁЖНЕЕ, чем доверять webhook.
-        """
+        """Проверяет статус платежа через API ЮKassa."""
         try:
             payment: PaymentResponse = Payment.find_one(payment_id)
             return {
@@ -150,11 +132,7 @@ class YooKassaService:
     # ОБРАБОТКА WEBHOOK
     # --------------------------------------------------------
     async def process_webhook(self, event_data: dict) -> None:
-        """
-        Обрабатывает webhook от ЮKassa.
-
-        ВАЖНО: всегда проверяем статус через API, не доверяем телу webhook.
-        """
+        """Обрабатывает webhook от ЮKassa."""
         try:
             notification = WebhookNotificationFactory().create(event_data)
         except Exception as e:
@@ -170,7 +148,6 @@ class YooKassaService:
             logger.debug(f"ЮKassa: неизвестное событие {event}, пропускаем")
             return
 
-        # Всегда проверяем через API
         try:
             status_info = await self.check_payment_status(payment_id)
         except Exception as e:
@@ -180,7 +157,6 @@ class YooKassaService:
         real_status = status_info["status"]
         logger.info(f"ЮKassa: реальный статус платежа {payment_id}: {real_status}")
 
-        # Ищем платёж в БД
         payment_row = await db.fetch_one(
             "SELECT * FROM payments WHERE yookassa_payment_id = %s",
             (payment_id,),
@@ -189,7 +165,6 @@ class YooKassaService:
             logger.warning(f"ЮKassa: платёж {payment_id} не найден в БД")
             return
 
-        # Защита от повторной обработки
         if payment_row["status"] in ("succeeded", "canceled", "refunded"):
             logger.info(
                 f"ЮKassa: платёж {payment_id} уже обработан "
@@ -197,7 +172,6 @@ class YooKassaService:
             )
             return
 
-        # Обновляем статус в БД
         await db.execute(
             """
             UPDATE payments
@@ -209,7 +183,6 @@ class YooKassaService:
             (real_status, _to_json(status_info), payment_row["id"]),
         )
 
-        # Если успешно — активируем PRO
         if real_status == "succeeded":
             await self._activate_pro(payment_row)
 
@@ -220,16 +193,10 @@ class YooKassaService:
     # АКТИВАЦИЯ PRO
     # --------------------------------------------------------
     async def _activate_pro(self, payment_row: dict) -> None:
-        """
-        Активирует или продлевает PRO у пользователя.
-
-        Если PRO уже активен — продлевает.
-        Если нет — устанавливает новый срок.
-        """
+        """Активирует или продлевает PRO у пользователя."""
         user_id = payment_row["user_id"]
         days = payment_row["pro_days"]
 
-        # Проверяем, не активировали ли уже (защита от двойной активации)
         if payment_row.get("activated_at"):
             logger.warning(
                 f"ЮKassa: платёж {payment_row['yookassa_payment_id']} "
@@ -245,26 +212,22 @@ class YooKassaService:
             logger.error(f"ЮKassa: пользователь {user_id} не найден")
             return
 
-        # Определяем новый срок
         now = datetime.now(timezone.utc)
         current_expires = user.get("pro_expires_at")
 
         if user["tariff"] == "pro" and current_expires and current_expires > now:
-            # Продление
             new_expires = current_expires + timedelta(days=days)
             logger.info(
                 f"ЮKassa: продление PRO для user={user['telegram_id']} "
                 f"до {new_expires.isoformat()}"
             )
         else:
-            # Новая активация
             new_expires = now + timedelta(days=days)
             logger.info(
                 f"ЮKassa: активация PRO для user={user['telegram_id']} "
                 f"до {new_expires.isoformat()}"
             )
 
-        # Обновляем пользователя
         await db.execute(
             """
             UPDATE users
@@ -275,7 +238,6 @@ class YooKassaService:
             (new_expires, user_id),
         )
 
-        # Помечаем платёж активированным
         await db.execute(
             """
             UPDATE payments
@@ -288,12 +250,19 @@ class YooKassaService:
         # Уведомляем пользователя
         await self._notify_activation(user["telegram_id"], new_expires)
 
+        # Уведомляем админа
+        await self._notify_admin_purchase(
+            user=user,
+            payment_row=payment_row,
+            new_expires=new_expires,
+        )
+
     async def _notify_activation(
         self,
         telegram_id: int,
         expires_at: datetime,
     ) -> None:
-        """Отправляет уведомление об активации PRO."""
+        """Отправляет уведомление пользователю об активации PRO."""
         from app.main import bot
 
         try:
@@ -311,50 +280,40 @@ class YooKassaService:
         except Exception as e:
             logger.warning(f"ЮKassa: не удалось уведомить {telegram_id}: {e}")
 
-    # --------------------------------------------------------
-    # ОТПРАВКА УВЕДОМЛЕНИЯ ОБ ОКОНЧАНИИ ПОДПИСКИ
-    # --------------------------------------------------------
-    async def notify_expiring_subscriptions(self) -> None:
-        """
-        Отправляет уведомления тем, у кого PRO истекает в течение 3 дней.
-
-        Вызывается из планировщика (например, раз в день).
-        """
+    async def _notify_admin_purchase(
+        self,
+        user: dict,
+        payment_row: dict,
+        new_expires: datetime,
+    ) -> None:
+        """Уведомляет админа о новой оплате PRO."""
         from app.main import bot
 
-        soon = datetime.now(timezone.utc) + timedelta(days=3)
+        admin_id = settings.admin_telegram_id
+        amount = float(payment_row["amount"])
 
-        users = await db.fetch_all(
-            """
-            SELECT telegram_id, pro_expires_at
-            FROM users
-            WHERE tariff = 'pro'
-              AND pro_expires_at IS NOT NULL
-              AND pro_expires_at <= %s
-              AND pro_expires_at > NOW()
-            """,
-            (soon,),
-        )
+        username = user.get("username")
+        first_name = user.get("first_name") or "—"
+        user_label = f"@{username}" if username else first_name
 
-        for u in users:
-            try:
-                days_left = (u["pro_expires_at"] - datetime.now(timezone.utc)).days
-                await bot.send_message(
-                    chat_id=u["telegram_id"],
-                    text=(
-                        f"⏰ <b>PRO истекает через {days_left} дн.</b>\n\n"
-                        f"Дата окончания: {u['pro_expires_at'].strftime('%d.%m.%Y')}\n\n"
-                        f"Продли подписку, чтобы не потерять доступ к безлимиту."
-                    ),
-                )
-                logger.info(
-                    f"ЮKassa: отправлено уведомление об окончании PRO "
-                    f"user={u['telegram_id']}, осталось {days_left} дн."
-                )
-            except Exception as e:
-                logger.warning(
-                    f"ЮKassa: не удалось уведомить {u['telegram_id']}: {e}"
-                )
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"💰 <b>Новая оплата PRO</b>\n\n"
+                    f"👤 Пользователь: {user_label}\n"
+                    f"🆔 Telegram ID: <code>{user['telegram_id']}</code>\n"
+                    f"💵 Сумма: <b>{amount:.0f} ₽</b>\n"
+                    f"📅 PRO до: {new_expires.strftime('%d.%m.%Y')}\n"
+                    f"🔑 Платёж: <code>{payment_row['yookassa_payment_id']}</code>"
+                ),
+            )
+            logger.info(
+                f"ЮKassa: уведомление админу отправлено "
+                f"(user={user['telegram_id']}, {amount} ₽)"
+            )
+        except Exception as e:
+            logger.warning(f"ЮKassa: не удалось уведомить админа: {e}")
 
 
 def _to_json(obj: Any) -> str:
@@ -378,12 +337,6 @@ def _to_json(obj: Any) -> str:
 yookassa_service = YooKassaService()
 
 
-# ============================================================
-# ФУНКЦИИ ДЛЯ MAIN.PY (WEBHOOK)
-# ============================================================
 async def process_webhook(data: dict) -> None:
-    """
-    Обрабатывает webhook от ЮKassa.
-    Вызывается из main.py при POST /yookassa/webhook.
-    """
+    """Webhook endpoint для main.py."""
     await yookassa_service.process_webhook(data)

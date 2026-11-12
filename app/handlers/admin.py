@@ -2,7 +2,7 @@
 Админ-панель.
 
 Доступ: только для ADMIN_TELEGRAM_ID.
-Функции: белый список, статистика, тикеты (позже).
+Функции: whitelist, PRO-пользователи, статистика.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from loguru import logger
 
 from app.config import settings
@@ -93,9 +94,6 @@ async def show_whitelist(callback: CallbackQuery) -> None:
             lines.append(f"• <code>{r['telegram_id']}</code>{note}{expires}")
         text = "\n".join(lines)
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    from aiogram.types import InlineKeyboardButton
-
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="➕ Добавить", callback_data="admin:wl:add"))
     builder.row(InlineKeyboardButton(text="➖ Удалить", callback_data="admin:wl:remove"))
@@ -115,8 +113,7 @@ async def wl_add_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text(
         "➕ <b>Добавление в белый список</b>\n\n"
         "Пришли <b>Telegram ID</b> пользователя (числом).\n\n"
-        "Как узнать ID: пусть пользователь напишет @userinfobot — "
-        "он покажет ID.",
+        "Как узнать ID: пусть пользователь напишет @userinfobot."
     )
     await callback.answer()
 
@@ -159,7 +156,7 @@ async def wl_add_note(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    row = await whitelist_service.add(
+    await whitelist_service.add(
         telegram_id=telegram_id,
         added_by=message.from_user.id,
         note=note,
@@ -218,6 +215,98 @@ async def wl_remove_id(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
+# PRO-ПОЛЬЗОВАТЕЛИ
+# ============================================================
+@router.callback_query(F.data == CB.ADMIN_PRO_USERS)
+async def show_pro_users(callback: CallbackQuery) -> None:
+    """Список PRO-пользователей с днями до конца подписки."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    users = await db.fetch_all(
+        """
+        SELECT telegram_id, username, first_name,
+               pro_expires_at
+        FROM users
+        WHERE tariff = 'pro'
+          AND pro_expires_at IS NOT NULL
+        ORDER BY pro_expires_at ASC
+        """
+    )
+
+    if not users:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
+        await callback.message.edit_text(
+            "⭐ <b>PRO-пользователи</b>\n\nПока никого нет.",
+            reply_markup=builder.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    now = datetime.now(timezone.utc)
+    lines = [f"⭐ <b>PRO-пользователи</b> ({len(users)})\n"]
+
+    for u in users:
+        expires = u["pro_expires_at"]
+        days_left = (expires - now).days
+
+        if days_left < 0:
+            status = "❌ истёк"
+        elif days_left == 0:
+            status = "🟡 истекает сегодня"
+        elif days_left <= 3:
+            status = f"🟠 {days_left} дн."
+        else:
+            status = f"🟢 {days_left} дн."
+
+        username = u.get("username")
+        first_name = u.get("first_name") or "—"
+        label = f"@{username}" if username else first_name
+
+        lines.append(
+            f"• <b>{label}</b> — <code>{u['telegram_id']}</code>\n"
+            f"  {status} · до {expires.strftime('%d.%m.%Y')}"
+        )
+
+    expiring_soon = sum(
+        1 for u in users
+        if 0 <= (u["pro_expires_at"] - now).days <= 3
+    )
+    if expiring_soon:
+        lines.append(f"\n⚠️ Истекает в ближайшие 3 дня: <b>{expiring_soon}</b>")
+
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔄 Обновить",
+        callback_data=CB.ADMIN_PRO_USERS,
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=CB.ADMIN_PANEL,
+    ))
+
+    if len(text) > 4000:
+        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks[:-1]:
+            await callback.message.answer(chunk)
+        await callback.message.edit_text(
+            chunks[-1],
+            reply_markup=builder.as_markup(),
+        )
+    else:
+        await callback.message.edit_text(
+            text,
+            reply_markup=builder.as_markup(),
+        )
+
+    await callback.answer(f"PRO: {len(users)}")
+
+
+# ============================================================
 # СТАТИСТИКА
 # ============================================================
 @router.callback_query(F.data == CB.ADMIN_STATS)
@@ -237,7 +326,6 @@ async def admin_stats(callback: CallbackQuery) -> None:
         "SELECT COUNT(*) FROM tasks WHERE status = 'done'"
     )
 
-    # Расход токенов
     tokens_today = await db.fetch_val(
         """
         SELECT COALESCE(SUM(total_tokens), 0) FROM gigachat_usage
@@ -251,10 +339,7 @@ async def admin_stats(callback: CallbackQuery) -> None:
         """
     ) or 0
     calls_today = await db.fetch_val(
-        """
-        SELECT COUNT(*) FROM gigachat_usage
-        WHERE created_at >= CURRENT_DATE
-        """
+        "SELECT COUNT(*) FROM gigachat_usage WHERE created_at >= CURRENT_DATE"
     ) or 0
     calls_month = await db.fetch_val(
         """
@@ -263,7 +348,13 @@ async def admin_stats(callback: CallbackQuery) -> None:
         """
     ) or 0
 
-    # Топ-3 пользователя по расходу за месяц
+    total_payments = await db.fetch_val(
+        """
+        SELECT COALESCE(SUM(amount), 0) FROM payments
+        WHERE status = 'succeeded' AND activated_at IS NOT NULL
+        """
+    ) or 0
+
     top_users = await db.fetch_all(
         """
         SELECT u.telegram_id, SUM(g.total_tokens) AS total
@@ -291,6 +382,8 @@ async def admin_stats(callback: CallbackQuery) -> None:
         f"📦 Товаров: {total_items}\n"
         f"🎯 Задач всего: {total_tasks}\n"
         f"✅ Успешных: {done_tasks}\n\n"
+        f"💰 <b>Финансы</b>\n"
+        f"Оплат PRO: {int(total_payments):,} ₽\n\n"
         f"🔢 <b>Расход GigaChat</b>\n"
         f"Сегодня: {int(tokens_today):,} токенов ({calls_today} вызовов)\n"
         f"За месяц: {int(tokens_month):,} токенов ({calls_month} вызовов)\n"
