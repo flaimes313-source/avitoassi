@@ -2,6 +2,7 @@
 Сервис поддержки (тикеты).
 
 Пользователь создаёт тикет → админ отвечает → пользователь видит ответ.
+Поддерживаются текстовые сообщения и скриншоты (photo).
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.database import db
+from app.database import db, to_jsonb
 
 
 class SupportService:
@@ -23,10 +24,11 @@ class SupportService:
         self,
         user_id: int,
         subject: str,
-        first_message: str,
+        first_message: str = "",
+        attachments: list[dict] | None = None,
     ) -> dict[str, Any]:
         """
-        Создаёт тикет и добавляет первое сообщение от пользователя.
+        Создаёт тикет и добавляет первое сообщение (текст и/или фото).
         """
         ticket = await db.execute_returning(
             """
@@ -42,35 +44,38 @@ class SupportService:
 
         await db.execute(
             """
-            INSERT INTO support_messages (ticket_id, sender, content)
-            VALUES (%s, 'user', %s)
+            INSERT INTO support_messages (
+                ticket_id, sender, content, attachments
+            )
+            VALUES (%s, 'user', %s, %s::jsonb)
             """,
-            (ticket["id"], first_message),
+            (ticket["id"], first_message, to_jsonb(attachments or [])),
         )
 
         logger.info(
             f"Поддержка: создан тикет #{ticket['id']} "
-            f"для user_id={user_id}"
+            f"для user_id={user_id} (attachments: {len(attachments or [])})"
         )
 
-        # Уведомляем админа
-        await self._notify_admin_new_ticket(ticket, first_message)
+        await self._notify_admin_new_ticket(
+            ticket,
+            first_message,
+            attachments or [],
+        )
 
         return ticket
 
     # --------------------------------------------------------
-    # СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ В ТИКЕТ
+    # СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ
     # --------------------------------------------------------
     async def add_user_message(
         self,
         ticket_id: int,
         user_id: int,
-        content: str,
+        content: str = "",
+        attachments: list[dict] | None = None,
     ) -> bool:
-        """
-        Добавляет сообщение пользователя в открытый тикет.
-        Возвращает True, если успешно.
-        """
+        """Добавляет сообщение пользователя в открытый тикет."""
         ticket = await db.fetch_one(
             """
             SELECT * FROM support_tickets
@@ -86,10 +91,12 @@ class SupportService:
 
         await db.execute(
             """
-            INSERT INTO support_messages (ticket_id, sender, content)
-            VALUES (%s, 'user', %s)
+            INSERT INTO support_messages (
+                ticket_id, sender, content, attachments
+            )
+            VALUES (%s, 'user', %s, %s::jsonb)
             """,
-            (ticket_id, content),
+            (ticket_id, content, to_jsonb(attachments or [])),
         )
 
         await db.execute(
@@ -104,26 +111,30 @@ class SupportService:
             (ticket_id,),
         )
 
-        logger.info(f"Поддержка: сообщение пользователя в тикет #{ticket_id}")
+        logger.info(
+            f"Поддержка: сообщение пользователя в тикет #{ticket_id} "
+            f"(attachments: {len(attachments or [])})"
+        )
 
-        # Уведомляем админа
-        await self._notify_admin_new_message(ticket, content)
+        await self._notify_admin_new_message(
+            ticket,
+            content,
+            attachments or [],
+        )
 
         return True
 
     # --------------------------------------------------------
-    # СООБЩЕНИЕ АДМИНА В ТИКЕТ
+    # СООБЩЕНИЕ АДМИНА
     # --------------------------------------------------------
     async def add_admin_message(
         self,
         ticket_id: int,
         admin_id: int,
-        content: str,
+        content: str = "",
+        attachments: list[dict] | None = None,
     ) -> dict[str, Any] | None:
-        """
-        Добавляет сообщение админа. Уведомляет пользователя.
-        Возвращает тикет или None.
-        """
+        """Добавляет сообщение админа. Уведомляет пользователя."""
         ticket = await db.fetch_one(
             "SELECT * FROM support_tickets WHERE id = %s",
             (ticket_id,),
@@ -137,11 +148,11 @@ class SupportService:
         await db.execute(
             """
             INSERT INTO support_messages (
-                ticket_id, sender, admin_telegram_id, content
+                ticket_id, sender, admin_telegram_id, content, attachments
             )
-            VALUES (%s, 'admin', %s, %s)
+            VALUES (%s, 'admin', %s, %s, %s::jsonb)
             """,
-            (ticket_id, admin_id, content),
+            (ticket_id, admin_id, content, to_jsonb(attachments or [])),
         )
 
         await db.execute(
@@ -156,18 +167,23 @@ class SupportService:
             (ticket_id,),
         )
 
-        logger.info(f"Поддержка: ответ админа в тикет #{ticket_id}")
+        logger.info(
+            f"Поддержка: ответ админа в тикет #{ticket_id} "
+            f"(attachments: {len(attachments or [])})"
+        )
 
-        # Уведомляем пользователя
-        await self._notify_user_new_reply(ticket, content)
+        await self._notify_user_new_reply(
+            ticket,
+            content,
+            attachments or [],
+        )
 
         return ticket
 
     # --------------------------------------------------------
-    # ЗАКРЫТИЕ ТИКЕТА
+    # ЗАКРЫТИЕ
     # --------------------------------------------------------
     async def close_ticket(self, ticket_id: int) -> bool:
-        """Закрывает тикет."""
         row = await db.execute_returning(
             """
             UPDATE support_tickets
@@ -187,11 +203,7 @@ class SupportService:
     # --------------------------------------------------------
     # СПИСКИ
     # --------------------------------------------------------
-    async def get_user_tickets(
-        self,
-        user_id: int,
-    ) -> list[dict[str, Any]]:
-        """Возвращает тикеты пользователя (свежие сверху)."""
+    async def get_user_tickets(self, user_id: int) -> list[dict[str, Any]]:
         return await db.fetch_all(
             """
             SELECT id, subject, status, last_reply_by,
@@ -205,7 +217,6 @@ class SupportService:
         )
 
     async def get_open_tickets(self) -> list[dict[str, Any]]:
-        """Возвращает открытые тикеты для админа."""
         return await db.fetch_all(
             """
             SELECT t.id, t.subject, t.status, t.last_reply_by,
@@ -223,7 +234,6 @@ class SupportService:
         self,
         ticket_id: int,
     ) -> tuple[dict, list[dict]] | None:
-        """Возвращает тикет + последние сообщения."""
         ticket = await db.fetch_one(
             """
             SELECT t.*, u.telegram_id, u.username, u.first_name
@@ -238,7 +248,8 @@ class SupportService:
 
         messages = await db.fetch_all(
             """
-            SELECT id, sender, admin_telegram_id, content, created_at
+            SELECT id, sender, admin_telegram_id, content,
+                   attachments, created_at
             FROM support_messages
             WHERE ticket_id = %s
             ORDER BY created_at ASC
@@ -250,7 +261,6 @@ class SupportService:
         return ticket, messages
 
     async def get_user_active_ticket(self, user_id: int) -> dict | None:
-        """Возвращает последний открытый тикет пользователя (если есть)."""
         return await db.fetch_one(
             """
             SELECT * FROM support_tickets
@@ -283,12 +293,12 @@ class SupportService:
         self,
         ticket: dict,
         message: str,
+        attachments: list[dict],
     ) -> None:
-        """Уведомляет админа о новом тикете."""
         from app.main import bot
         from app.config import settings
         from aiogram.utils.keyboard import InlineKeyboardBuilder
-        from aiogram.types import InlineKeyboardButton
+        from aiogram.types import InlineKeyboardButton, InputMediaPhoto
 
         try:
             builder = InlineKeyboardBuilder()
@@ -297,17 +307,43 @@ class SupportService:
                 callback_data=f"admin:ticket:{ticket['id']}",
             ))
 
+            # Формируем текст
             preview = message[:500] + ("..." if len(message) > 500 else "")
+            attachments_note = ""
+            if attachments:
+                attachments_note = f"\n\n📎 Скриншотов: {len(attachments)}"
 
-            await bot.send_message(
-                chat_id=settings.admin_telegram_id,
-                text=(
-                    f"🎫 <b>Новый тикет #{ticket['id']}</b>\n\n"
-                    f"📝 {ticket['subject']}\n\n"
-                    f"{preview}"
-                ),
-                reply_markup=builder.as_markup(),
+            text = (
+                f"🎫 <b>Новый тикет #{ticket['id']}</b>\n\n"
+                f"📝 {ticket['subject']}\n\n"
+                f"{preview}{attachments_note}"
             )
+
+            # Если есть фото — отправляем с фото
+            photos = [
+                a["file_id"] for a in attachments
+                if a.get("type") == "photo" and a.get("file_id")
+            ]
+
+            if photos:
+                # Отправляем первое фото с подписью, остальные — отдельно
+                await bot.send_photo(
+                    chat_id=settings.admin_telegram_id,
+                    photo=photos[0],
+                    caption=text[:1024],
+                    reply_markup=builder.as_markup(),
+                )
+                for extra_photo in photos[1:]:
+                    await bot.send_photo(
+                        chat_id=settings.admin_telegram_id,
+                        photo=extra_photo,
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=settings.admin_telegram_id,
+                    text=text,
+                    reply_markup=builder.as_markup(),
+                )
         except Exception as e:
             logger.warning(f"Не удалось уведомить админа о тикете: {e}")
 
@@ -315,8 +351,8 @@ class SupportService:
         self,
         ticket: dict,
         message: str,
+        attachments: list[dict],
     ) -> None:
-        """Уведомляет админа о новом сообщении в тикете."""
         from app.main import bot
         from app.config import settings
         from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -330,15 +366,36 @@ class SupportService:
             ))
 
             preview = message[:300] + ("..." if len(message) > 300 else "")
+            attachments_note = f" 📎 {len(attachments)}" if attachments else ""
 
-            await bot.send_message(
-                chat_id=settings.admin_telegram_id,
-                text=(
-                    f"💬 <b>Новое сообщение в тикете #{ticket['id']}</b>\n\n"
-                    f"{preview}"
-                ),
-                reply_markup=builder.as_markup(),
+            text = (
+                f"💬 <b>Новое сообщение в тикете #{ticket['id']}</b>{attachments_note}\n\n"
+                f"{preview}"
             )
+
+            photos = [
+                a["file_id"] for a in attachments
+                if a.get("type") == "photo" and a.get("file_id")
+            ]
+
+            if photos:
+                await bot.send_photo(
+                    chat_id=settings.admin_telegram_id,
+                    photo=photos[0],
+                    caption=text[:1024],
+                    reply_markup=builder.as_markup(),
+                )
+                for extra_photo in photos[1:]:
+                    await bot.send_photo(
+                        chat_id=settings.admin_telegram_id,
+                        photo=extra_photo,
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=settings.admin_telegram_id,
+                    text=text,
+                    reply_markup=builder.as_markup(),
+                )
         except Exception as e:
             logger.warning(f"Не удалось уведомить админа: {e}")
 
@@ -346,8 +403,8 @@ class SupportService:
         self,
         ticket: dict,
         message: str,
+        attachments: list[dict],
     ) -> None:
-        """Уведомляет пользователя о новом ответе поддержки."""
         from app.main import bot
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         from aiogram.types import InlineKeyboardButton
@@ -366,15 +423,35 @@ class SupportService:
                 callback_data="support:list",
             ))
 
-            await bot.send_message(
-                chat_id=user["telegram_id"],
-                text=(
-                    f"💬 <b>Ответ поддержки</b>\n\n"
-                    f"Тикет #{ticket['id']}: {ticket['subject']}\n\n"
-                    f"{message}"
-                ),
-                reply_markup=builder.as_markup(),
+            text = (
+                f"💬 <b>Ответ поддержки</b>\n\n"
+                f"Тикет #{ticket['id']}: {ticket['subject']}\n\n"
+                f"{message}"
             )
+
+            photos = [
+                a["file_id"] for a in attachments
+                if a.get("type") == "photo" and a.get("file_id")
+            ]
+
+            if photos:
+                await bot.send_photo(
+                    chat_id=user["telegram_id"],
+                    photo=photos[0],
+                    caption=text[:1024],
+                    reply_markup=builder.as_markup(),
+                )
+                for extra_photo in photos[1:]:
+                    await bot.send_photo(
+                        chat_id=user["telegram_id"],
+                        photo=extra_photo,
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=user["telegram_id"],
+                    text=text,
+                    reply_markup=builder.as_markup(),
+                )
         except Exception as e:
             logger.warning(f"Не удалось уведомить пользователя: {e}")
 

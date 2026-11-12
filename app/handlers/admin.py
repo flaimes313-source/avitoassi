@@ -2,7 +2,7 @@
 Админ-панель.
 
 Доступ: только для ADMIN_TELEGRAM_ID.
-Функции: whitelist, PRO-пользователи, поддержка (тикеты), статистика.
+Функции: whitelist, PRO-пользователи, поддержка (тикеты с фото), статистика.
 """
 
 from __future__ import annotations
@@ -217,7 +217,6 @@ async def wl_remove_id(message: Message, state: FSMContext) -> None:
 # ============================================================
 @router.callback_query(F.data == CB.ADMIN_PRO_USERS)
 async def show_pro_users(callback: CallbackQuery) -> None:
-    """Список PRO-пользователей с днями до конца подписки."""
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -311,7 +310,6 @@ async def reply_ticket_start(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
-    """Начинает режим ответа на тикет."""
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -332,7 +330,7 @@ async def reply_ticket_start(
 
     await callback.message.answer(
         f"✏️ <b>Ответ на тикет #{ticket_id}</b>\n\n"
-        f"Напиши сообщение — оно уйдёт пользователю.\n\n"
+        f"Напиши текст или отправь скриншот с подписью.\n\n"
         f"Отменить: /cancel",
     )
     await callback.answer()
@@ -376,7 +374,6 @@ async def open_ticket(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
-    """Открывает тикет для админа — показывает переписку."""
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -386,7 +383,6 @@ async def open_ticket(
         await callback.answer("Ошибка: неверный callback", show_alert=True)
         return
 
-    # Явно проверяем, что это не reply: и не close:
     if parts[2] in ("reply", "close"):
         return
 
@@ -415,24 +411,42 @@ async def open_ticket(
     username = ticket.get("username")
     user_label = f"@{username}" if username else (ticket.get("first_name") or "—")
 
-    lines = [
-        f"🎫 <b>Тикет #{ticket['id']}</b>",
-        f"От: {user_label} (<code>{ticket['telegram_id']}</code>)",
-        f"📝 {ticket['subject']}",
-        f"Статус: {status_label}",
-        "━━━━━━━━━━━━━━━━━━━",
-    ]
+    # Заголовок
+    header_text = (
+        f"🎫 <b>Тикет #{ticket['id']}</b>\n"
+        f"От: {user_label} (<code>{ticket['telegram_id']}</code>)\n"
+        f"📝 {ticket['subject']}\n"
+        f"Статус: {status_label}"
+    )
+    await callback.message.answer(header_text)
 
+    # Сообщения по одному (с фото)
     for m in messages:
         time = m["created_at"].strftime("%d.%m %H:%M")
-        if m["sender"] == "user":
-            lines.append(f"👤 <b>Пользователь</b> <i>{time}</i>:\n{m['content']}")
+        sender = "👤 Пользователь" if m["sender"] == "user" else "🛠 Ты"
+        content = m.get("content") or ""
+        text = f"{sender} <i>{time}</i>:\n{content}" if content else f"{sender} <i>{time}</i>:"
+
+        attachments = m.get("attachments") or []
+        photos = [
+            a["file_id"] for a in attachments
+            if a.get("type") == "photo" and a.get("file_id")
+        ]
+
+        if photos:
+            try:
+                await callback.message.answer_photo(
+                    photo=photos[0],
+                    caption=text[:1024],
+                )
+                for extra in photos[1:]:
+                    await callback.message.answer_photo(photo=extra)
+            except Exception:
+                await callback.message.answer(text)
         else:
-            lines.append(f"🛠 <b>Ты</b> <i>{time}</i>:\n{m['content']}")
-        lines.append("")
+            await callback.message.answer(text)
 
-    text = "\n".join(lines)
-
+    # Кнопки
     builder = InlineKeyboardBuilder()
     if ticket["status"] != "closed":
         builder.row(InlineKeyboardButton(
@@ -445,21 +459,16 @@ async def open_ticket(
         ))
     builder.row(InlineKeyboardButton(text="🔙 К тикетам", callback_data=CB.ADMIN_TICKETS))
 
-    if len(text) > 4000:
-        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
-        for chunk in chunks[:-1]:
-            await callback.message.answer(chunk)
-        await callback.message.answer(chunks[-1], reply_markup=builder.as_markup())
-    else:
-        await callback.message.answer(text, reply_markup=builder.as_markup())
-
+    await callback.message.answer(
+        "Действия:",
+        reply_markup=builder.as_markup(),
+    )
     await callback.answer()
 
 
 # --- 4. Список тикетов ---
 @router.callback_query(F.data == CB.ADMIN_TICKETS)
 async def show_tickets(callback: CallbackQuery) -> None:
-    """Список открытых тикетов."""
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -513,9 +522,9 @@ async def show_tickets(callback: CallbackQuery) -> None:
     await callback.answer(f"Тикетов: {len(tickets)}")
 
 
-# --- 5. Отправка ответа в тикет (текстовый обработчик) ---
+# --- 5. Отправка ответа (текст) ---
 @router.message(AdminStates.waiting_reply, F.text, ~F.text.startswith("/"))
-async def send_ticket_reply(
+async def send_ticket_reply_text(
     message: Message,
     state: FSMContext,
 ) -> None:
@@ -543,6 +552,53 @@ async def send_ticket_reply(
     if ok:
         await message.answer(
             f"✅ Ответ отправлен в тикет #{ticket_id}.",
+            reply_markup=admin_panel(),
+        )
+    else:
+        await message.answer(
+            "⚠️ Не удалось отправить. Тикет закрыт или не найден.",
+            reply_markup=admin_panel(),
+        )
+
+
+# --- 6. Отправка ответа (фото) ---
+@router.message(AdminStates.waiting_reply, F.photo)
+async def send_ticket_reply_photo(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    ticket_id = data.get("admin_ticket_id")
+
+    if not ticket_id:
+        await state.clear()
+        await message.answer("Ошибка: тикет потерян.")
+        return
+
+    photo = message.photo[-1]
+    caption = (message.caption or "").strip()
+
+    from app.services.support_service import support_service
+
+    ok = await support_service.add_admin_message(
+        ticket_id=ticket_id,
+        admin_id=message.from_user.id,
+        content=caption,
+        attachments=[{
+            "type": "photo",
+            "file_id": photo.file_id,
+            "file_unique_id": photo.file_unique_id,
+        }],
+    )
+
+    await state.clear()
+
+    if ok:
+        await message.answer(
+            f"✅ Скриншот отправлен в тикет #{ticket_id}.",
             reply_markup=admin_panel(),
         )
     else:
