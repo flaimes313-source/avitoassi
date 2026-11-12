@@ -2,7 +2,7 @@
 Админ-панель.
 
 Доступ: только для ADMIN_TELEGRAM_ID.
-Функции: whitelist, PRO-пользователи, статистика.
+Функции: whitelist, PRO-пользователи, поддержка (тикеты), статистика.
 """
 
 from __future__ import annotations
@@ -34,11 +34,9 @@ class AdminStates(StatesGroup):
     waiting_add_id = State()
     waiting_add_note = State()
     waiting_remove_id = State()
+    waiting_reply = State()
 
 
-# ============================================================
-# ФИЛЬТР: только админ
-# ============================================================
 def is_admin(user_id: int) -> bool:
     return user_id == settings.admin_telegram_id
 
@@ -226,8 +224,7 @@ async def show_pro_users(callback: CallbackQuery) -> None:
 
     users = await db.fetch_all(
         """
-        SELECT telegram_id, username, first_name,
-               pro_expires_at
+        SELECT telegram_id, username, first_name, pro_expires_at
         FROM users
         WHERE tariff = 'pro'
           AND pro_expires_at IS NOT NULL
@@ -281,12 +278,10 @@ async def show_pro_users(callback: CallbackQuery) -> None:
 
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
-        text="🔄 Обновить",
-        callback_data=CB.ADMIN_PRO_USERS,
+        text="🔄 Обновить", callback_data=CB.ADMIN_PRO_USERS,
     ))
     builder.row(InlineKeyboardButton(
-        text="🔙 Назад",
-        callback_data=CB.ADMIN_PANEL,
+        text="🔙 Назад", callback_data=CB.ADMIN_PANEL,
     ))
 
     if len(text) > 4000:
@@ -304,6 +299,263 @@ async def show_pro_users(callback: CallbackQuery) -> None:
         )
 
     await callback.answer(f"PRO: {len(users)}")
+
+
+# ============================================================
+# ТИКЕТЫ ПОДДЕРЖКИ — СПЕЦИФИЧНЫЕ CALLBACKS ПЕРВЫМИ
+# ============================================================
+
+# --- 1. Ответ на тикет (самый специфичный) ---
+@router.callback_query(F.data.startswith("admin:ticket:reply:"))
+async def reply_ticket_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Начинает режим ответа на тикет."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка: неверный callback", show_alert=True)
+        return
+
+    try:
+        ticket_id = int(parts[3])
+    except (ValueError, IndexError):
+        await callback.answer("Ошибка: неверный ticket_id", show_alert=True)
+        return
+
+    await state.update_data(admin_ticket_id=ticket_id)
+    await state.set_state(AdminStates.waiting_reply)
+
+    await callback.message.answer(
+        f"✏️ <b>Ответ на тикет #{ticket_id}</b>\n\n"
+        f"Напиши сообщение — оно уйдёт пользователю.\n\n"
+        f"Отменить: /cancel",
+    )
+    await callback.answer()
+
+
+# --- 2. Закрытие тикета ---
+@router.callback_query(F.data.startswith("admin:ticket:close:"))
+async def close_ticket(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка: неверный callback", show_alert=True)
+        return
+
+    try:
+        ticket_id = int(parts[3])
+    except (ValueError, IndexError):
+        await callback.answer("Ошибка: неверный ticket_id", show_alert=True)
+        return
+
+    from app.services.support_service import support_service
+
+    ok = await support_service.close_ticket(ticket_id)
+
+    if ok:
+        await callback.answer("Тикет закрыт")
+        await callback.message.edit_text(
+            f"✅ Тикет #{ticket_id} закрыт.",
+            reply_markup=admin_panel(),
+        )
+    else:
+        await callback.answer("Не удалось закрыть", show_alert=True)
+
+
+# --- 3. Открытие тикета (общий, ПОСЛЕ специфичных) ---
+@router.callback_query(F.data.startswith("admin:ticket:"))
+async def open_ticket(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Открывает тикет для админа — показывает переписку."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка: неверный callback", show_alert=True)
+        return
+
+    # Явно проверяем, что это не reply: и не close:
+    if parts[2] in ("reply", "close"):
+        return
+
+    try:
+        ticket_id = int(parts[2])
+    except (ValueError, IndexError):
+        await callback.answer("Ошибка: неверный ticket_id", show_alert=True)
+        return
+
+    from app.services.support_service import support_service
+
+    result = await support_service.get_ticket_with_messages(ticket_id)
+    if not result:
+        await callback.answer("Тикет не найден.", show_alert=True)
+        return
+
+    ticket, messages = result
+    await support_service.mark_read_by_admin(ticket_id)
+
+    status_label = {
+        "open": "🟡 Открыт",
+        "in_progress": "🟢 В работе",
+        "closed": "✅ Закрыт",
+    }.get(ticket["status"], ticket["status"])
+
+    username = ticket.get("username")
+    user_label = f"@{username}" if username else (ticket.get("first_name") or "—")
+
+    lines = [
+        f"🎫 <b>Тикет #{ticket['id']}</b>",
+        f"От: {user_label} (<code>{ticket['telegram_id']}</code>)",
+        f"📝 {ticket['subject']}",
+        f"Статус: {status_label}",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for m in messages:
+        time = m["created_at"].strftime("%d.%m %H:%M")
+        if m["sender"] == "user":
+            lines.append(f"👤 <b>Пользователь</b> <i>{time}</i>:\n{m['content']}")
+        else:
+            lines.append(f"🛠 <b>Ты</b> <i>{time}</i>:\n{m['content']}")
+        lines.append("")
+
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    if ticket["status"] != "closed":
+        builder.row(InlineKeyboardButton(
+            text="✏️ Ответить",
+            callback_data=f"admin:ticket:reply:{ticket_id}",
+        ))
+        builder.row(InlineKeyboardButton(
+            text="✅ Закрыть тикет",
+            callback_data=f"admin:ticket:close:{ticket_id}",
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 К тикетам", callback_data=CB.ADMIN_TICKETS))
+
+    if len(text) > 4000:
+        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks[:-1]:
+            await callback.message.answer(chunk)
+        await callback.message.answer(chunks[-1], reply_markup=builder.as_markup())
+    else:
+        await callback.message.answer(text, reply_markup=builder.as_markup())
+
+    await callback.answer()
+
+
+# --- 4. Список тикетов ---
+@router.callback_query(F.data == CB.ADMIN_TICKETS)
+async def show_tickets(callback: CallbackQuery) -> None:
+    """Список открытых тикетов."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    from app.services.support_service import support_service
+
+    tickets = await support_service.get_open_tickets()
+
+    if not tickets:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
+        await callback.message.edit_text(
+            "🎫 <b>Тикеты поддержки</b>\n\nОткрытых тикетов нет.",
+            reply_markup=builder.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    builder = InlineKeyboardBuilder()
+    lines = [f"🎫 <b>Открытые тикеты</b> ({len(tickets)})\n"]
+
+    for t in tickets:
+        unread = f" 🔴{t['unread_by_admin']}" if t["unread_by_admin"] > 0 else ""
+        status_emoji = "🟡" if t["status"] == "open" else "🟢"
+
+        username = t.get("username")
+        label = f"@{username}" if username else (t.get("first_name") or "—")
+
+        lines.append(
+            f"{status_emoji} <b>#{t['id']}</b> от {label}{unread}\n"
+            f"  {t['subject'][:60]}"
+        )
+
+        btn_text = f"{status_emoji} #{t['id']}"
+        if t["unread_by_admin"] > 0:
+            btn_text += f" 🔴{t['unread_by_admin']}"
+        btn_text += f" — {t['subject'][:25]}"
+
+        builder.row(InlineKeyboardButton(
+            text=btn_text,
+            callback_data=f"admin:ticket:{t['id']}",
+        ))
+
+    builder.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=CB.ADMIN_TICKETS))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer(f"Тикетов: {len(tickets)}")
+
+
+# --- 5. Отправка ответа в тикет (текстовый обработчик) ---
+@router.message(AdminStates.waiting_reply, F.text, ~F.text.startswith("/"))
+async def send_ticket_reply(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    ticket_id = data.get("admin_ticket_id")
+
+    if not ticket_id:
+        await state.clear()
+        await message.answer("Ошибка: тикет потерян.")
+        return
+
+    from app.services.support_service import support_service
+
+    ok = await support_service.add_admin_message(
+        ticket_id=ticket_id,
+        admin_id=message.from_user.id,
+        content=message.text,
+    )
+
+    await state.clear()
+
+    if ok:
+        await message.answer(
+            f"✅ Ответ отправлен в тикет #{ticket_id}.",
+            reply_markup=admin_panel(),
+        )
+    else:
+        await message.answer(
+            "⚠️ Не удалось отправить. Тикет закрыт или не найден.",
+            reply_markup=admin_panel(),
+        )
+
+
+@router.message(Command("cancel"), AdminStates.waiting_reply)
+async def cancel_admin_reply(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=admin_panel())
 
 
 # ============================================================
@@ -355,6 +607,10 @@ async def admin_stats(callback: CallbackQuery) -> None:
         """
     ) or 0
 
+    open_tickets = await db.fetch_val(
+        "SELECT COUNT(*) FROM support_tickets WHERE status <> 'closed'"
+    ) or 0
+
     top_users = await db.fetch_all(
         """
         SELECT u.telegram_id, SUM(g.total_tokens) AS total
@@ -378,7 +634,8 @@ async def admin_stats(callback: CallbackQuery) -> None:
         f"📊 <b>Статистика</b>\n\n"
         f"👥 Пользователей: {total_users}\n"
         f"⭐ PRO (платных): {pro_users}\n"
-        f"🎁 Whitelist: {wl_count}\n\n"
+        f"🎁 Whitelist: {wl_count}\n"
+        f"🎫 Тикетов открыто: {open_tickets}\n\n"
         f"📦 Товаров: {total_items}\n"
         f"🎯 Задач всего: {total_tasks}\n"
         f"✅ Успешных: {done_tasks}\n\n"
@@ -394,232 +651,3 @@ async def admin_stats(callback: CallbackQuery) -> None:
 
     await callback.message.edit_text(text, reply_markup=admin_panel())
     await callback.answer()
-    # ============================================================
-# ТИКЕТЫ ПОДДЕРЖКИ
-# ============================================================
-class AdminTicketStates(StatesGroup):
-    waiting_reply = State()
-
-
-@router.callback_query(F.data == CB.ADMIN_TICKETS)
-async def show_tickets(callback: CallbackQuery) -> None:
-    """Список открытых тикетов."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    from app.services.support_service import support_service
-
-    tickets = await support_service.get_open_tickets()
-
-    if not tickets:
-        builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
-        await callback.message.edit_text(
-            "🎫 <b>Тикеты поддержки</b>\n\n"
-            "Открытых тикетов нет.",
-            reply_markup=builder.as_markup(),
-        )
-        await callback.answer()
-        return
-
-    builder = InlineKeyboardBuilder()
-    lines = [f"🎫 <b>Открытые тикеты</b> ({len(tickets)})\n"]
-
-    for t in tickets:
-        unread = f" 🔴{t['unread_by_admin']}" if t["unread_by_admin"] > 0 else ""
-        status_emoji = "🟡" if t["status"] == "open" else "🟢"
-
-        username = t.get("username")
-        label = f"@{username}" if username else (t.get("first_name") or "—")
-
-        lines.append(
-            f"{status_emoji} <b>#{t['id']}</b> от {label}{unread}\n"
-            f"  {t['subject'][:60]}"
-        )
-
-        btn_text = f"{status_emoji} #{t['id']}"
-        if t["unread_by_admin"] > 0:
-            btn_text += f" 🔴{t['unread_by_admin']}"
-        btn_text += f" — {t['subject'][:25]}"
-
-        builder.row(InlineKeyboardButton(
-            text=btn_text,
-            callback_data=f"admin:ticket:{t['id']}",
-        ))
-
-    builder.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=CB.ADMIN_TICKETS))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
-
-    await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=builder.as_markup(),
-    )
-    await callback.answer(f"Тикетов: {len(tickets)}")
-
-
-@router.callback_query(F.data.startswith("admin:ticket:"))
-async def open_ticket(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    """Открывает тикет для админа — показывает переписку."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    from app.services.support_service import support_service
-
-    ticket_id = int(callback.data.split(":", 2)[2])
-
-    result = await support_service.get_ticket_with_messages(ticket_id)
-    if not result:
-        await callback.answer("Тикет не найден.", show_alert=True)
-        return
-
-    ticket, messages = result
-
-    await support_service.mark_read_by_admin(ticket_id)
-
-    status_label = {
-        "open": "🟡 Открыт",
-        "in_progress": "🟢 В работе",
-        "closed": "✅ Закрыт",
-    }.get(ticket["status"], ticket["status"])
-
-    username = ticket.get("username")
-    user_label = f"@{username}" if username else (ticket.get("first_name") or "—")
-
-    lines = [
-        f"🎫 <b>Тикет #{ticket['id']}</b>",
-        f"От: {user_label} (<code>{ticket['telegram_id']}</code>)",
-        f"📝 {ticket['subject']}",
-        f"Статус: {status_label}",
-        "━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for m in messages:
-        time = m["created_at"].strftime("%d.%m %H:%M")
-        if m["sender"] == "user":
-            lines.append(f"👤 <b>Пользователь</b> <i>{time}</i>:\n{m['content']}")
-        else:
-            lines.append(f"🛠 <b>Ты</b> <i>{time}</i>:\n{m['content']}")
-        lines.append("")
-
-    text = "\n".join(lines)
-
-    builder = InlineKeyboardBuilder()
-
-    if ticket["status"] != "closed":
-        builder.row(InlineKeyboardButton(
-            text="✏️ Ответить",
-            callback_data=f"admin:ticket:reply:{ticket_id}",
-        ))
-        builder.row(InlineKeyboardButton(
-            text="✅ Закрыть тикет",
-            callback_data=f"admin:ticket:close:{ticket_id}",
-        ))
-
-    builder.row(InlineKeyboardButton(text="🔙 К тикетам", callback_data=CB.ADMIN_TICKETS))
-
-    # Отправляем (разбивая если длинно)
-    if len(text) > 4000:
-        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
-        for chunk in chunks[:-1]:
-            await callback.message.answer(chunk)
-        await callback.message.answer(chunks[-1], reply_markup=builder.as_markup())
-    else:
-        await callback.message.answer(text, reply_markup=builder.as_markup())
-
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("admin:ticket:reply:"))
-async def reply_ticket_start(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    """Начинает режим ответа на тикет."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    ticket_id = int(callback.data.split(":", 3)[3])
-
-    await state.update_data(admin_ticket_id=ticket_id)
-    await state.set_state(AdminTicketStates.waiting_reply)
-
-    await callback.message.answer(
-        f"✏️ <b>Ответ на тикет #{ticket_id}</b>\n\n"
-        f"Напиши сообщение — оно уйдёт пользователю.\n\n"
-        f"Отменить: /cancel",
-    )
-    await callback.answer()
-
-
-@router.message(AdminTicketStates.waiting_reply, F.text, ~F.text.startswith("/"))
-async def send_ticket_reply(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    if not is_admin(message.from_user.id):
-        return
-
-    data = await state.get_data()
-    ticket_id = data.get("admin_ticket_id")
-
-    if not ticket_id:
-        await state.clear()
-        await message.answer("Ошибка: тикет потерян.")
-        return
-
-    from app.services.support_service import support_service
-
-    ok = await support_service.add_admin_message(
-        ticket_id=ticket_id,
-        admin_id=message.from_user.id,
-        content=message.text,
-    )
-
-    await state.clear()
-
-    if ok:
-        await message.answer(
-            f"✅ Ответ отправлен в тикет #{ticket_id}.",
-            reply_markup=admin_panel(),
-        )
-    else:
-        await message.answer(
-            "⚠️ Не удалось отправить. Тикет закрыт или не найден.",
-            reply_markup=admin_panel(),
-        )
-
-
-@router.callback_query(F.data.startswith("admin:ticket:close:"))
-async def close_ticket(
-    callback: CallbackQuery,
-) -> None:
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    from app.services.support_service import support_service
-
-    ticket_id = int(callback.data.split(":", 3)[3])
-
-    ok = await support_service.close_ticket(ticket_id)
-
-    if ok:
-        await callback.answer("Тикет закрыт")
-        await callback.message.edit_text(
-            f"✅ Тикет #{ticket_id} закрыт.",
-            reply_markup=admin_panel(),
-        )
-    else:
-        await callback.answer("Не удалось закрыть", show_alert=True)
-
-
-@router.message(Command("cancel"), AdminTicketStates.waiting_reply)
-async def cancel_admin_reply(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("❌ Отменено.", reply_markup=admin_panel())
