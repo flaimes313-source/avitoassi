@@ -8,6 +8,7 @@
 - Активация PRO после подтверждённой оплаты
 - Защита от повторной обработки (idempotency_key)
 - Уведомление админа при покупке
+- Отслеживание блокировки бота
 """
 
 from __future__ import annotations
@@ -111,7 +112,7 @@ class YooKassaService:
             raise
 
     # --------------------------------------------------------
-    # ПРОВЕРКА СТАТУСА (SERVER-SIDE)
+    # ПРОВЕРКА СТАТУСА
     # --------------------------------------------------------
     async def check_payment_status(self, payment_id: str) -> dict[str, Any]:
         """Проверяет статус платежа через API ЮKassa."""
@@ -185,7 +186,6 @@ class YooKassaService:
 
         if real_status == "succeeded":
             await self._activate_pro(payment_row)
-
         elif real_status == "canceled":
             logger.info(f"ЮKassa: платёж {payment_id} отменён")
 
@@ -239,18 +239,12 @@ class YooKassaService:
         )
 
         await db.execute(
-            """
-            UPDATE payments
-            SET activated_at = NOW()
-            WHERE id = %s
-            """,
+            "UPDATE payments SET activated_at = NOW() WHERE id = %s",
             (payment_row["id"],),
         )
 
-        # Уведомляем пользователя
         await self._notify_activation(user["telegram_id"], new_expires)
 
-        # Уведомляем админа
         await self._notify_admin_purchase(
             user=user,
             payment_row=payment_row,
@@ -262,8 +256,9 @@ class YooKassaService:
         telegram_id: int,
         expires_at: datetime,
     ) -> None:
-        """Отправляет уведомление пользователю об активации PRO."""
+        """Уведомляет пользователя об активации PRO."""
         from app.main import bot
+        from aiogram.exceptions import TelegramForbiddenError
 
         try:
             await bot.send_message(
@@ -276,6 +271,16 @@ class YooKassaService:
                     f"• Приоритетные рекомендации\n\n"
                     f"Действует до: <b>{expires_at.strftime('%d.%m.%Y')}</b>"
                 ),
+            )
+            await db.execute(
+                "UPDATE users SET bot_blocked = FALSE WHERE telegram_id = %s AND bot_blocked = TRUE",
+                (telegram_id,),
+            )
+        except TelegramForbiddenError:
+            logger.info(f"ЮKassa: пользователь {telegram_id} заблокировал бота")
+            await db.execute(
+                "UPDATE users SET bot_blocked = TRUE WHERE telegram_id = %s",
+                (telegram_id,),
             )
         except Exception as e:
             logger.warning(f"ЮKassa: не удалось уведомить {telegram_id}: {e}")

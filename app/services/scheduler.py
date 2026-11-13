@@ -4,7 +4,7 @@
 Задачи:
 - Планировать напоминания через 1/3/7 дней после завершения задачи
 - Ежедневная проверка истекающих PRO (за 1 день)
-- Сохранять задачи в PostgreSQL (переживают перезапуск BotHost)
+- Отслеживание блокировки бота (bot_blocked)
 """
 
 from __future__ import annotations
@@ -174,6 +174,7 @@ async def _send_reminder_job(
     from app.database import db
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
+    from aiogram.exceptions import TelegramForbiddenError
 
     logger.info(f"Отправка напоминания id={reminder_id} → {user_telegram_id}")
 
@@ -228,15 +229,33 @@ async def _send_reminder_job(
             callback_data="menu:main",
         ))
 
-        await bot.send_message(
-            chat_id=user_telegram_id,
-            text=text,
-            reply_markup=builder.as_markup(),
-        )
+        try:
+            await bot.send_message(
+                chat_id=user_telegram_id,
+                text=text,
+                reply_markup=builder.as_markup(),
+            )
+        except TelegramForbiddenError:
+            logger.info(f"Пользователь {user_telegram_id} заблокировал бота")
+            await db.execute(
+                "UPDATE users SET bot_blocked = TRUE WHERE telegram_id = %s",
+                (user_telegram_id,),
+            )
+            await db.execute(
+                "UPDATE reminders SET sent_at = NOW() WHERE id = %s",
+                (reminder_id,),
+            )
+            return
 
         await db.execute(
             "UPDATE reminders SET sent_at = NOW() WHERE id = %s",
             (reminder_id,),
+        )
+
+        # Разблокировался — сбрасываем флаг, если был
+        await db.execute(
+            "UPDATE users SET bot_blocked = FALSE WHERE telegram_id = %s AND bot_blocked = TRUE",
+            (user_telegram_id,),
         )
 
         logger.info(f"Напоминание {reminder_id} отправлено")
@@ -249,14 +268,12 @@ async def _send_reminder_job(
 # JOB: ЕЖЕДНЕВНАЯ ПРОВЕРКА ИСТЕКАЮЩИХ PRO
 # ============================================================
 async def _check_expiring_pro_job() -> None:
-    """
-    Находит пользователей, у которых PRO истекает завтра,
-    и отправляет предупреждение.
-    """
+    """Отправляет уведомления об истекающих PRO (за 1 день)."""
     from app.main import bot
     from app.database import db
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
+    from aiogram.exceptions import TelegramForbiddenError
 
     logger.info("Проверка истекающих PRO-подписок...")
 
@@ -290,18 +307,27 @@ async def _check_expiring_pro_job() -> None:
                     callback_data="menu:main",
                 ))
 
-                await bot.send_message(
-                    chat_id=u["telegram_id"],
-                    text=(
-                        f"⏰ <b>PRO заканчивается через 1 день</b>\n\n"
-                        f"Дата окончания: <b>{expires.strftime('%d.%m.%Y')}</b>\n\n"
-                        f"После окончания ты вернёшься на Free "
-                        f"(3 задачи в месяц).\n\n"
-                        f"Продли подписку, чтобы сохранить безлимит."
-                    ),
-                    reply_markup=builder.as_markup(),
-                )
-                sent_count += 1
+                try:
+                    await bot.send_message(
+                        chat_id=u["telegram_id"],
+                        text=(
+                            f"⏰ <b>PRO заканчивается через 1 день</b>\n\n"
+                            f"Дата окончания: <b>{expires.strftime('%d.%m.%Y')}</b>\n\n"
+                            f"После окончания ты вернёшься на Free "
+                            f"(3 задачи в месяц).\n\n"
+                            f"Продли подписку, чтобы сохранить безлимит."
+                        ),
+                        reply_markup=builder.as_markup(),
+                    )
+                    sent_count += 1
+                except TelegramForbiddenError:
+                    logger.info(f"Пользователь {u['telegram_id']} заблокировал бота")
+                    await db.execute(
+                        "UPDATE users SET bot_blocked = TRUE WHERE telegram_id = %s",
+                        (u["telegram_id"],),
+                    )
+                    continue
+
                 logger.info(
                     f"Отправлено уведомление об окончании PRO "
                     f"user={u['telegram_id']}, {days_left} дн."

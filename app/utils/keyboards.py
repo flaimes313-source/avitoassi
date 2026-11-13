@@ -138,6 +138,7 @@ class CB:
     ADMIN_STATS = "admin:stats"
     ADMIN_WHITELIST = "admin:whitelist"
     ADMIN_PRO_USERS = "admin:pro_users"
+    ADMIN_ALL_USERS = "admin:all_users"
 
 
 # ============================================================
@@ -475,8 +476,9 @@ def support_menu() -> InlineKeyboardMarkup:
 # ============================================================
 def admin_panel() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(btn("🎁 Белый список", CB.ADMIN_WHITELIST))
+    builder.row(btn("👥 Все пользователи", CB.ADMIN_ALL_USERS))
     builder.row(btn("⭐ PRO-пользователи", CB.ADMIN_PRO_USERS))
+    builder.row(btn("🎁 Белый список", CB.ADMIN_WHITELIST))
     builder.row(btn("🎫 Тикеты поддержки", CB.ADMIN_TICKETS))
     builder.row(btn("📢 Рассылка", CB.ADMIN_BROADCAST))
     builder.row(btn("📊 Статистика", CB.ADMIN_STATS))

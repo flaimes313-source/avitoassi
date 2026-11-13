@@ -3,6 +3,7 @@
 
 Пользователь создаёт тикет → админ отвечает → пользователь видит ответ.
 Поддерживаются текстовые сообщения и скриншоты (photo).
+Отслеживается блокировка бота.
 """
 
 from __future__ import annotations
@@ -27,9 +28,7 @@ class SupportService:
         first_message: str = "",
         attachments: list[dict] | None = None,
     ) -> dict[str, Any]:
-        """
-        Создаёт тикет и добавляет первое сообщение (текст и/или фото).
-        """
+        """Создаёт тикет и добавляет первое сообщение."""
         ticket = await db.execute_returning(
             """
             INSERT INTO support_tickets (
@@ -58,9 +57,7 @@ class SupportService:
         )
 
         await self._notify_admin_new_ticket(
-            ticket,
-            first_message,
-            attachments or [],
+            ticket, first_message, attachments or [],
         )
 
         return ticket
@@ -77,16 +74,10 @@ class SupportService:
     ) -> bool:
         """Добавляет сообщение пользователя в открытый тикет."""
         ticket = await db.fetch_one(
-            """
-            SELECT * FROM support_tickets
-            WHERE id = %s AND user_id = %s
-            """,
+            "SELECT * FROM support_tickets WHERE id = %s AND user_id = %s",
             (ticket_id, user_id),
         )
-        if not ticket:
-            return False
-
-        if ticket["status"] == "closed":
+        if not ticket or ticket["status"] == "closed":
             return False
 
         await db.execute(
@@ -117,9 +108,7 @@ class SupportService:
         )
 
         await self._notify_admin_new_message(
-            ticket,
-            content,
-            attachments or [],
+            ticket, content, attachments or [],
         )
 
         return True
@@ -139,10 +128,7 @@ class SupportService:
             "SELECT * FROM support_tickets WHERE id = %s",
             (ticket_id,),
         )
-        if not ticket:
-            return None
-
-        if ticket["status"] == "closed":
+        if not ticket or ticket["status"] == "closed":
             return None
 
         await db.execute(
@@ -173,9 +159,7 @@ class SupportService:
         )
 
         await self._notify_user_new_reply(
-            ticket,
-            content,
-            attachments or [],
+            ticket, content, attachments or [],
         )
 
         return ticket
@@ -298,7 +282,7 @@ class SupportService:
         from app.main import bot
         from app.config import settings
         from aiogram.utils.keyboard import InlineKeyboardBuilder
-        from aiogram.types import InlineKeyboardButton, InputMediaPhoto
+        from aiogram.types import InlineKeyboardButton
 
         try:
             builder = InlineKeyboardBuilder()
@@ -307,11 +291,8 @@ class SupportService:
                 callback_data=f"admin:ticket:{ticket['id']}",
             ))
 
-            # Формируем текст
             preview = message[:500] + ("..." if len(message) > 500 else "")
-            attachments_note = ""
-            if attachments:
-                attachments_note = f"\n\n📎 Скриншотов: {len(attachments)}"
+            attachments_note = f"\n\n📎 Скриншотов: {len(attachments)}" if attachments else ""
 
             text = (
                 f"🎫 <b>Новый тикет #{ticket['id']}</b>\n\n"
@@ -319,14 +300,12 @@ class SupportService:
                 f"{preview}{attachments_note}"
             )
 
-            # Если есть фото — отправляем с фото
             photos = [
                 a["file_id"] for a in attachments
                 if a.get("type") == "photo" and a.get("file_id")
             ]
 
             if photos:
-                # Отправляем первое фото с подписью, остальные — отдельно
                 await bot.send_photo(
                     chat_id=settings.admin_telegram_id,
                     photo=photos[0],
@@ -408,6 +387,7 @@ class SupportService:
         from app.main import bot
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         from aiogram.types import InlineKeyboardButton
+        from aiogram.exceptions import TelegramForbiddenError
 
         user = await db.fetch_one(
             "SELECT telegram_id FROM users WHERE id = %s",
@@ -452,6 +432,17 @@ class SupportService:
                     text=text,
                     reply_markup=builder.as_markup(),
                 )
+
+            await db.execute(
+                "UPDATE users SET bot_blocked = FALSE WHERE telegram_id = %s AND bot_blocked = TRUE",
+                (user["telegram_id"],),
+            )
+        except TelegramForbiddenError:
+            logger.info(f"Поддержка: {user['telegram_id']} заблокировал бота")
+            await db.execute(
+                "UPDATE users SET bot_blocked = TRUE WHERE telegram_id = %s",
+                (user["telegram_id"],),
+            )
         except Exception as e:
             logger.warning(f"Не удалось уведомить пользователя: {e}")
 

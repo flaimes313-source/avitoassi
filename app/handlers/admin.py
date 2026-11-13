@@ -707,3 +707,136 @@ async def admin_stats(callback: CallbackQuery) -> None:
 
     await callback.message.edit_text(text, reply_markup=admin_panel())
     await callback.answer()
+    # ============================================================
+# ВСЕ ПОЛЬЗОВАТЕЛИ
+# ============================================================
+@router.callback_query(F.data == CB.ADMIN_ALL_USERS)
+async def show_all_users(callback: CallbackQuery) -> None:
+    """Список всех пользователей с деталями."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    users = await db.fetch_all(
+        """
+        SELECT
+            u.id,
+            u.telegram_id,
+            u.username,
+            u.first_name,
+            u.last_name,
+            u.tariff,
+            u.pro_expires_at,
+            u.bot_blocked,
+            u.onboarded,
+            u.created_at,
+            (SELECT COUNT(*) FROM items WHERE user_id = u.id) AS items_count,
+            (SELECT COUNT(*) FROM tasks WHERE user_id = u.id) AS tasks_count,
+            (SELECT MAX(created_at) FROM tasks WHERE user_id = u.id) AS last_activity
+        FROM users u
+        ORDER BY u.created_at DESC
+        LIMIT 100
+        """
+    )
+
+    if not users:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
+        await callback.message.edit_text(
+            "👥 <b>Все пользователи</b>\n\nПока никого нет.",
+            reply_markup=builder.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    # Считаем статистику
+    total = len(users)
+    pro_count = sum(1 for u in users if u["tariff"] == "pro")
+    free_count = total - pro_count
+    blocked_count = sum(1 for u in users if u["bot_blocked"])
+
+    # Формируем список
+    now = datetime.now(timezone.utc)
+    lines = [
+        f"👥 <b>Все пользователи</b> ({total})\n",
+        f"📊 Статистика:",
+        f"  • PRO: {pro_count}",
+        f"  • Free: {free_count}",
+        f"  • 🚫 Заблокировали бота: {blocked_count}\n",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for u in users[:50]:  # первые 50 для читаемости
+        # Метка пользователя
+        username = u.get("username")
+        first_name = u.get("first_name") or "—"
+        label = f"@{username}" if username else first_name
+
+        # Тариф
+        if u["tariff"] == "pro":
+            expires = u.get("pro_expires_at")
+            if expires:
+                days = (expires - now).days
+                if days < 0:
+                    tariff_label = "⭐ PRO (истёк)"
+                else:
+                    tariff_label = f"⭐ PRO ({days} дн.)"
+            else:
+                tariff_label = "⭐ PRO"
+        else:
+            tariff_label = "🆓 Free"
+
+        # Блокировка
+        blocked = " 🚫" if u.get("bot_blocked") else ""
+
+        # Онбординг
+        onboarding = "" if u.get("onboarded") else " ⚠️не настроен"
+
+        # Дата регистрации
+        registered = u["created_at"].strftime("%d.%m.%Y")
+
+        # Активность
+        if u.get("last_activity"):
+            activity = u["last_activity"].strftime("%d.%m")
+        else:
+            activity = "нет"
+
+        # Статистика
+        stats = f"{u.get('items_count', 0)}📦 / {u.get('tasks_count', 0)}🎯"
+
+        lines.append(
+            f"<b>{label}</b>{blocked}{onboarding}\n"
+            f"  🆔 <code>{u['telegram_id']}</code>\n"
+            f"  {tariff_label} · Рег: {registered}\n"
+            f"  Акт: {activity} · {stats}"
+        )
+
+    if total > 50:
+        lines.append(f"\n<i>… и ещё {total - 50} пользователей</i>")
+
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔄 Обновить", callback_data=CB.ADMIN_ALL_USERS,
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад", callback_data=CB.ADMIN_PANEL,
+    ))
+
+    # Если длинно — разбиваем
+    if len(text) > 4000:
+        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks[:-1]:
+            await callback.message.answer(chunk)
+        await callback.message.edit_text(
+            chunks[-1],
+            reply_markup=builder.as_markup(),
+        )
+    else:
+        await callback.message.edit_text(
+            text,
+            reply_markup=builder.as_markup(),
+        )
+
+    await callback.answer(f"Всего: {total}, PRO: {pro_count}, 🚫: {blocked_count}")
