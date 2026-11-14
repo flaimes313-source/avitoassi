@@ -133,12 +133,23 @@ class CB:
 
     # ---- Админка ----
     ADMIN_PANEL = "admin:panel"
-    ADMIN_BROADCAST = "admin:broadcast"
     ADMIN_TICKETS = "admin:tickets"
     ADMIN_STATS = "admin:stats"
     ADMIN_WHITELIST = "admin:whitelist"
     ADMIN_PRO_USERS = "admin:pro_users"
     ADMIN_ALL_USERS = "admin:all_users"
+    ADMIN_BROADCAST = "admin:broadcast"
+
+    # ---- Рассылки (админка) ----
+    BC_NEW = "bc:new"
+    BC_HISTORY = "bc:history"
+    BC_AUDIENCE_ALL = "bc:audience:all"
+    BC_AUDIENCE_ONBOARDED = "bc:audience:onboarded"
+    BC_AUDIENCE_PRO = "bc:audience:pro"
+    BC_AUDIENCE_FREE = "bc:audience:free"
+    BC_AUDIENCE_EX_PRO = "bc:audience:ex_pro"
+    BC_SEND_NOW = "bc:send_now"
+    BC_CANCEL = "bc:cancel"
 
 
 # ============================================================
@@ -176,7 +187,7 @@ def btn_url(text: str, url: str) -> InlineKeyboardButton:
 
 
 # ============================================================
-# ГЛАВНОЕ МЕНЮ
+# ГЛАВНОЕ МЕНЮ (2 кнопки в ряд)
 # ============================================================
 def main_menu_reply() -> ReplyKeyboardMarkup:
     kb = [
@@ -254,7 +265,7 @@ def onboarding_privacy() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# СОЗДАНИЕ ОБЪЯВЛЕНИЯ
+# СОЗДАНИЕ ОБЪЯВЛЕНИЯ (блок 3)
 # ============================================================
 def create_listing_start() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -311,7 +322,7 @@ def listing_after_edit() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ
+# УЛУЧШЕНИЕ ОБЪЯВЛЕНИЯ (блок 4)
 # ============================================================
 def improve_materials() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -337,7 +348,7 @@ def improve_problems() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# АНАЛИЗ КОНКУРЕНТОВ
+# АНАЛИЗ КОНКУРЕНТОВ (блок 5)
 # ============================================================
 def competitors_collect() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -348,7 +359,7 @@ def competitors_collect() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# ФОТО
+# ФОТО (блок 6)
 # ============================================================
 def photos_actions() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -360,7 +371,7 @@ def photos_actions() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# СТРАТЕГИЯ
+# СТРАТЕГИЯ (блок 7)
 # ============================================================
 def strategy_actions() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -371,7 +382,7 @@ def strategy_actions() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# ОТВЕТЫ ПОКУПАТЕЛЯМ
+# ОТВЕТЫ ПОКУПАТЕЛЯМ (блок 8)
 # ============================================================
 def buyer_reply_goals() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -386,7 +397,7 @@ def buyer_reply_goals() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# КАРТОЧКА ТОВАРА
+# КАРТОЧКА ТОВАРА (блок 9)
 # ============================================================
 def item_after_action(item_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -490,4 +501,33 @@ def admin_whitelist_menu() -> InlineKeyboardMarkup:
     builder.row(btn("➕ Добавить", "admin:wl:add"))
     builder.row(btn("➖ Удалить", "admin:wl:remove"))
     builder.row(btn("🔙 Назад", CB.ADMIN_PANEL))
+    return builder.as_markup()
+
+
+# ============================================================
+# РАССЫЛКИ (АДМИН)
+# ============================================================
+def broadcast_menu() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("✉️ Создать рассылку", CB.BC_NEW))
+    builder.row(btn("📜 История рассылок", CB.BC_HISTORY))
+    builder.row(btn("🔙 Назад", CB.ADMIN_PANEL))
+    return builder.as_markup()
+
+
+def broadcast_audience_menu() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(btn("👥 Всем пользователям", CB.BC_AUDIENCE_ALL))
+    builder.row(btn("✅ Только активным", CB.BC_AUDIENCE_ONBOARDED))
+    builder.row(btn("⭐ Только PRO", CB.BC_AUDIENCE_PRO))
+    builder.row(btn("🆓 Только Free", CB.BC_AUDIENCE_FREE))
+    builder.row(btn("📉 Бывшим PRO (истёк)", CB.BC_AUDIENCE_EX_PRO))
+    builder.row(btn("❌ Отменить", CB.BC_CANCEL))
+    return builder.as_markup()
+
+
+def broadcast_confirm(audience_label: str, count: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(btn(f"🚀 Отправить ({count})", CB.BC_SEND_NOW))
+    builder.row(btn("❌ Отменить", CB.BC_CANCEL))
     return builder.as_markup()

@@ -2,7 +2,8 @@
 Админ-панель.
 
 Доступ: только для ADMIN_TELEGRAM_ID.
-Функции: whitelist, PRO-пользователи, поддержка (тикеты с фото), статистика.
+Функции: whitelist, PRO-пользователи, все пользователи,
+поддержка (тикеты с фото), рассылки, статистика.
 """
 
 from __future__ import annotations
@@ -24,6 +25,9 @@ from app.utils.keyboards import (
     CB,
     admin_panel,
     back_to_menu,
+    broadcast_audience_menu,
+    broadcast_confirm,
+    broadcast_menu,
     main_menu_reply,
 )
 
@@ -35,6 +39,12 @@ class AdminStates(StatesGroup):
     waiting_add_note = State()
     waiting_remove_id = State()
     waiting_reply = State()
+
+
+class BroadcastStates(StatesGroup):
+    waiting_text = State()
+    waiting_audience = State()
+    waiting_confirm = State()
 
 
 def is_admin(user_id: int) -> bool:
@@ -276,12 +286,8 @@ async def show_pro_users(callback: CallbackQuery) -> None:
     text = "\n".join(lines)
 
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(
-        text="🔄 Обновить", callback_data=CB.ADMIN_PRO_USERS,
-    ))
-    builder.row(InlineKeyboardButton(
-        text="🔙 Назад", callback_data=CB.ADMIN_PANEL,
-    ))
+    builder.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=CB.ADMIN_PRO_USERS))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
 
     if len(text) > 4000:
         chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
@@ -301,15 +307,130 @@ async def show_pro_users(callback: CallbackQuery) -> None:
 
 
 # ============================================================
-# ТИКЕТЫ ПОДДЕРЖКИ — СПЕЦИФИЧНЫЕ CALLBACKS ПЕРВЫМИ
+# ВСЕ ПОЛЬЗОВАТЕЛИ
+# ============================================================
+@router.callback_query(F.data == CB.ADMIN_ALL_USERS)
+async def show_all_users(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    users = await db.fetch_all(
+        """
+        SELECT
+            u.id,
+            u.telegram_id,
+            u.username,
+            u.first_name,
+            u.last_name,
+            u.tariff,
+            u.pro_expires_at,
+            u.bot_blocked,
+            u.onboarded,
+            u.created_at,
+            (SELECT COUNT(*) FROM items WHERE user_id = u.id) AS items_count,
+            (SELECT COUNT(*) FROM tasks WHERE user_id = u.id) AS tasks_count,
+            (SELECT MAX(created_at) FROM tasks WHERE user_id = u.id) AS last_activity
+        FROM users u
+        ORDER BY u.created_at DESC
+        LIMIT 100
+        """
+    )
+
+    if not users:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
+        await callback.message.edit_text(
+            "👥 <b>Все пользователи</b>\n\nПока никого нет.",
+            reply_markup=builder.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    total = len(users)
+    pro_count = sum(1 for u in users if u["tariff"] == "pro")
+    free_count = total - pro_count
+    blocked_count = sum(1 for u in users if u["bot_blocked"])
+
+    now = datetime.now(timezone.utc)
+    lines = [
+        f"👥 <b>Все пользователи</b> ({total})\n",
+        f"📊 Статистика:",
+        f"  • PRO: {pro_count}",
+        f"  • Free: {free_count}",
+        f"  • 🚫 Заблокировали бота: {blocked_count}\n",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for u in users[:50]:
+        username = u.get("username")
+        first_name = u.get("first_name") or "—"
+        label = f"@{username}" if username else first_name
+
+        if u["tariff"] == "pro":
+            expires = u.get("pro_expires_at")
+            if expires:
+                days = (expires - now).days
+                if days < 0:
+                    tariff_label = "⭐ PRO (истёк)"
+                else:
+                    tariff_label = f"⭐ PRO ({days} дн.)"
+            else:
+                tariff_label = "⭐ PRO"
+        else:
+            tariff_label = "🆓 Free"
+
+        blocked = " 🚫" if u.get("bot_blocked") else ""
+        onboarding = "" if u.get("onboarded") else " ⚠️не настроен"
+
+        registered = u["created_at"].strftime("%d.%m.%Y")
+
+        if u.get("last_activity"):
+            activity = u["last_activity"].strftime("%d.%m")
+        else:
+            activity = "нет"
+
+        stats = f"{u.get('items_count', 0)}📦 / {u.get('tasks_count', 0)}🎯"
+
+        lines.append(
+            f"<b>{label}</b>{blocked}{onboarding}\n"
+            f"  🆔 <code>{u['telegram_id']}</code>\n"
+            f"  {tariff_label} · Рег: {registered}\n"
+            f"  Акт: {activity} · {stats}"
+        )
+
+    if total > 50:
+        lines.append(f"\n<i>… и ещё {total - 50} пользователей</i>")
+
+    text = "\n".join(lines)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=CB.ADMIN_ALL_USERS))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
+
+    if len(text) > 4000:
+        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks[:-1]:
+            await callback.message.answer(chunk)
+        await callback.message.edit_text(
+            chunks[-1],
+            reply_markup=builder.as_markup(),
+        )
+    else:
+        await callback.message.edit_text(
+            text,
+            reply_markup=builder.as_markup(),
+        )
+
+    await callback.answer(f"Всего: {total}, PRO: {pro_count}, 🚫: {blocked_count}")
+
+
+# ============================================================
+# ТИКЕТЫ ПОДДЕРЖКИ — СПЕЦИФИЧНЫЕ ПЕРВЫМИ
 # ============================================================
 
-# --- 1. Ответ на тикет (самый специфичный) ---
 @router.callback_query(F.data.startswith("admin:ticket:reply:"))
-async def reply_ticket_start(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
+async def reply_ticket_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -336,7 +457,6 @@ async def reply_ticket_start(
     await callback.answer()
 
 
-# --- 2. Закрытие тикета ---
 @router.callback_query(F.data.startswith("admin:ticket:close:"))
 async def close_ticket(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -368,12 +488,8 @@ async def close_ticket(callback: CallbackQuery) -> None:
         await callback.answer("Не удалось закрыть", show_alert=True)
 
 
-# --- 3. Открытие тикета (общий, ПОСЛЕ специфичных) ---
 @router.callback_query(F.data.startswith("admin:ticket:"))
-async def open_ticket(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
+async def open_ticket(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -411,7 +527,6 @@ async def open_ticket(
     username = ticket.get("username")
     user_label = f"@{username}" if username else (ticket.get("first_name") or "—")
 
-    # Заголовок
     header_text = (
         f"🎫 <b>Тикет #{ticket['id']}</b>\n"
         f"От: {user_label} (<code>{ticket['telegram_id']}</code>)\n"
@@ -420,7 +535,6 @@ async def open_ticket(
     )
     await callback.message.answer(header_text)
 
-    # Сообщения по одному (с фото)
     for m in messages:
         time = m["created_at"].strftime("%d.%m %H:%M")
         sender = "👤 Пользователь" if m["sender"] == "user" else "🛠 Ты"
@@ -446,7 +560,6 @@ async def open_ticket(
         else:
             await callback.message.answer(text)
 
-    # Кнопки
     builder = InlineKeyboardBuilder()
     if ticket["status"] != "closed":
         builder.row(InlineKeyboardButton(
@@ -466,7 +579,6 @@ async def open_ticket(
     await callback.answer()
 
 
-# --- 4. Список тикетов ---
 @router.callback_query(F.data == CB.ADMIN_TICKETS)
 async def show_tickets(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -522,12 +634,8 @@ async def show_tickets(callback: CallbackQuery) -> None:
     await callback.answer(f"Тикетов: {len(tickets)}")
 
 
-# --- 5. Отправка ответа (текст) ---
 @router.message(AdminStates.waiting_reply, F.text, ~F.text.startswith("/"))
-async def send_ticket_reply_text(
-    message: Message,
-    state: FSMContext,
-) -> None:
+async def send_ticket_reply_text(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
 
@@ -561,12 +669,8 @@ async def send_ticket_reply_text(
         )
 
 
-# --- 6. Отправка ответа (фото) ---
 @router.message(AdminStates.waiting_reply, F.photo)
-async def send_ticket_reply_photo(
-    message: Message,
-    state: FSMContext,
-) -> None:
+async def send_ticket_reply_photo(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
 
@@ -615,6 +719,284 @@ async def cancel_admin_reply(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
+# РАССЫЛКИ
+# ============================================================
+@router.callback_query(F.data == CB.ADMIN_BROADCAST)
+async def show_broadcast_menu(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    from app.services.broadcast_service import broadcast_service
+
+    recent = await broadcast_service.get_recent_broadcasts(limit=5)
+
+    lines = ["📢 <b>Рассылки</b>\n"]
+
+    if recent:
+        lines.append("<b>Последние:</b>")
+        for b in recent:
+            status_emoji = {
+                "draft": "📝",
+                "running": "🔄",
+                "done": "✅",
+                "cancelled": "❌",
+            }.get(b["status"], "❓")
+
+            audience = (b.get("audience_filter") or {}).get("audience", "all")
+
+            lines.append(
+                f"{status_emoji} #{b['id']}: {b['title'][:40]}\n"
+                f"   📤 {b['sent_count']}/{b['total_recipients']} · {audience}"
+            )
+    else:
+        lines.append("Рассылок ещё не было.")
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=broadcast_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == CB.BC_NEW)
+async def broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await state.set_state(BroadcastStates.waiting_text)
+    await state.update_data(bc_media=[])
+
+    await callback.message.edit_text(
+        "✉️ <b>Новая рассылка</b>\n\n"
+        "Отправь текст сообщения (можно с фото — фото подписью к тексту).\n\n"
+        "Форматирование: HTML поддерживается.\n\n"
+        "Отменить: /cancel"
+    )
+    await callback.answer()
+
+
+@router.message(BroadcastStates.waiting_text, F.text, ~F.text.startswith("/"))
+async def broadcast_text_received(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    text = (message.text or "").strip()
+    if len(text) < 5:
+        await message.answer("🤔 Слишком короткий текст. Минимум 5 символов.")
+        return
+
+    await state.update_data(bc_text=text)
+    await state.set_state(BroadcastStates.waiting_audience)
+
+    await message.answer(
+        "✅ Текст сохранён.\n\nВыбери аудиторию:",
+        reply_markup=broadcast_audience_menu(),
+    )
+
+
+@router.message(BroadcastStates.waiting_text, F.photo)
+async def broadcast_photo_received(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    photo = message.photo[-1]
+    caption = (message.caption or "").strip()
+
+    data = await state.get_data()
+    media = data.get("bc_media", [])
+
+    if len(media) >= 10:
+        await message.answer("⚠️ Максимум 10 фото.")
+        return
+
+    media.append({"type": "photo", "file_id": photo.file_id})
+
+    await state.update_data(
+        bc_media=media,
+        bc_text=caption or data.get("bc_text", ""),
+    )
+
+    await message.answer(
+        f"📸 Фото добавлено (всего: {len(media)}).\n\n"
+        f"Отправь ещё фото или напиши текст."
+    )
+
+
+@router.callback_query(F.data.startswith("bc:audience:"))
+async def broadcast_audience_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    audience = callback.data.split(":")[2]
+    from app.services.broadcast_service import broadcast_service
+
+    labels = broadcast_service.AUDIENCE_LABELS
+    audience_label = labels.get(audience, audience)
+
+    count = await broadcast_service.count_audience(audience)
+
+    if count == 0:
+        await callback.answer("В этой аудитории нет получателей", show_alert=True)
+        return
+
+    await state.update_data(bc_audience=audience)
+    await state.set_state(BroadcastStates.waiting_confirm)
+
+    data = await state.get_data()
+    text = data.get("bc_text", "")
+    media = data.get("bc_media", [])
+
+    preview = text[:300] + ("..." if len(text) > 300 else "")
+
+    await callback.message.edit_text(
+        f"📢 <b>Проверь рассылку</b>\n\n"
+        f"<b>Аудитория:</b> {audience_label}\n"
+        f"<b>Получателей:</b> {count}\n"
+        f"<b>Фото:</b> {len(media)}\n\n"
+        f"<b>Текст:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"{preview}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Отправляем?",
+        reply_markup=broadcast_confirm(audience_label, count),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == CB.BC_SEND_NOW)
+async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    data = await state.get_data()
+    text = data.get("bc_text", "")
+    media = data.get("bc_media", [])
+    audience = data.get("bc_audience")
+
+    if not text and not media:
+        await callback.answer("Пустая рассылка", show_alert=True)
+        return
+
+    if not audience:
+        await callback.answer("Аудитория не выбрана", show_alert=True)
+        return
+
+    from app.services.broadcast_service import broadcast_service
+
+    labels = broadcast_service.AUDIENCE_LABELS
+    audience_label = labels.get(audience, audience)
+
+    title = text[:60] if text else "Рассылка с фото"
+    broadcast = await broadcast_service.create_broadcast(
+        title=title,
+        message_text=text,
+        audience=audience,
+        media=media,
+    )
+
+    total = broadcast["total_recipients"]
+
+    await callback.message.edit_text(
+        f"🚀 <b>Рассылка #{broadcast['id']} запущена</b>\n\n"
+        f"Аудитория: {audience_label}\n"
+        f"Получателей: {total}\n\n"
+        f"Отправляю… Это может занять несколько минут.\n"
+        f"Пришлю отчёт, когда закончу."
+    )
+    await callback.answer("Запущено")
+
+    await state.clear()
+
+    try:
+        result = await broadcast_service.send_broadcast(broadcast["id"])
+
+        await callback.message.answer(
+            f"✅ <b>Рассылка #{broadcast['id']} завершена</b>\n\n"
+            f"📤 Отправлено: <b>{result['sent']}</b>\n"
+            f"❌ Ошибок: {result['failed']}\n"
+            f"👥 Всего: {result['total']}"
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка рассылки: {e}")
+        await callback.message.answer(
+            f"❌ Рассылка #{broadcast['id']} упала: {e}\n\n"
+            f"Проверь статус в /admin → 📢 Рассылка.",
+        )
+
+
+@router.callback_query(F.data == CB.BC_HISTORY)
+async def broadcast_history(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    from app.services.broadcast_service import broadcast_service
+
+    broadcasts = await broadcast_service.get_recent_broadcasts(limit=10)
+
+    if not broadcasts:
+        await callback.message.edit_text(
+            "📜 <b>История рассылок</b>\n\nРассылок не было.",
+            reply_markup=broadcast_menu(),
+        )
+        await callback.answer()
+        return
+
+    lines = ["📜 <b>История рассылок</b>\n"]
+
+    for b in broadcasts:
+        status_emoji = {
+            "draft": "📝",
+            "running": "🔄",
+            "done": "✅",
+            "cancelled": "❌",
+        }.get(b["status"], "❓")
+
+        date = b["created_at"].strftime("%d.%m %H:%M")
+
+        lines.append(
+            f"{status_emoji} <b>#{b['id']}</b> от {date}\n"
+            f"  {b['title'][:50]}\n"
+            f"  📤 {b['sent_count']}/{b['total_recipients']} · ❌ {b['failed_count']}"
+        )
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=broadcast_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == CB.BC_CANCEL)
+async def broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Рассылка отменена.",
+        reply_markup=admin_panel(),
+    )
+    await callback.answer()
+
+
+@router.message(Command("cancel"), BroadcastStates.waiting_text)
+@router.message(Command("cancel"), BroadcastStates.waiting_audience)
+@router.message(Command("cancel"), BroadcastStates.waiting_confirm)
+async def cancel_broadcast(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "❌ Рассылка отменена.",
+        reply_markup=admin_panel(),
+    )
+
+
+# ============================================================
 # СТАТИСТИКА
 # ============================================================
 @router.callback_query(F.data == CB.ADMIN_STATS)
@@ -625,14 +1007,10 @@ async def admin_stats(callback: CallbackQuery) -> None:
 
     total_users = await db.fetch_val("SELECT COUNT(*) FROM users")
     pro_users = await db.fetch_val("SELECT COUNT(*) FROM users WHERE tariff = 'pro'")
-    wl_count = await db.fetch_val(
-        "SELECT COUNT(*) FROM whitelist WHERE is_active = TRUE"
-    )
+    wl_count = await db.fetch_val("SELECT COUNT(*) FROM whitelist WHERE is_active = TRUE")
     total_items = await db.fetch_val("SELECT COUNT(*) FROM items")
     total_tasks = await db.fetch_val("SELECT COUNT(*) FROM tasks")
-    done_tasks = await db.fetch_val(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'done'"
-    )
+    done_tasks = await db.fetch_val("SELECT COUNT(*) FROM tasks WHERE status = 'done'")
 
     tokens_today = await db.fetch_val(
         """
@@ -650,10 +1028,7 @@ async def admin_stats(callback: CallbackQuery) -> None:
         "SELECT COUNT(*) FROM gigachat_usage WHERE created_at >= CURRENT_DATE"
     ) or 0
     calls_month = await db.fetch_val(
-        """
-        SELECT COUNT(*) FROM gigachat_usage
-        WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE)
-        """
+        "SELECT COUNT(*) FROM gigachat_usage WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE)"
     ) or 0
 
     total_payments = await db.fetch_val(
@@ -707,136 +1082,3 @@ async def admin_stats(callback: CallbackQuery) -> None:
 
     await callback.message.edit_text(text, reply_markup=admin_panel())
     await callback.answer()
-    # ============================================================
-# ВСЕ ПОЛЬЗОВАТЕЛИ
-# ============================================================
-@router.callback_query(F.data == CB.ADMIN_ALL_USERS)
-async def show_all_users(callback: CallbackQuery) -> None:
-    """Список всех пользователей с деталями."""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    users = await db.fetch_all(
-        """
-        SELECT
-            u.id,
-            u.telegram_id,
-            u.username,
-            u.first_name,
-            u.last_name,
-            u.tariff,
-            u.pro_expires_at,
-            u.bot_blocked,
-            u.onboarded,
-            u.created_at,
-            (SELECT COUNT(*) FROM items WHERE user_id = u.id) AS items_count,
-            (SELECT COUNT(*) FROM tasks WHERE user_id = u.id) AS tasks_count,
-            (SELECT MAX(created_at) FROM tasks WHERE user_id = u.id) AS last_activity
-        FROM users u
-        ORDER BY u.created_at DESC
-        LIMIT 100
-        """
-    )
-
-    if not users:
-        builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=CB.ADMIN_PANEL))
-        await callback.message.edit_text(
-            "👥 <b>Все пользователи</b>\n\nПока никого нет.",
-            reply_markup=builder.as_markup(),
-        )
-        await callback.answer()
-        return
-
-    # Считаем статистику
-    total = len(users)
-    pro_count = sum(1 for u in users if u["tariff"] == "pro")
-    free_count = total - pro_count
-    blocked_count = sum(1 for u in users if u["bot_blocked"])
-
-    # Формируем список
-    now = datetime.now(timezone.utc)
-    lines = [
-        f"👥 <b>Все пользователи</b> ({total})\n",
-        f"📊 Статистика:",
-        f"  • PRO: {pro_count}",
-        f"  • Free: {free_count}",
-        f"  • 🚫 Заблокировали бота: {blocked_count}\n",
-        "━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for u in users[:50]:  # первые 50 для читаемости
-        # Метка пользователя
-        username = u.get("username")
-        first_name = u.get("first_name") or "—"
-        label = f"@{username}" if username else first_name
-
-        # Тариф
-        if u["tariff"] == "pro":
-            expires = u.get("pro_expires_at")
-            if expires:
-                days = (expires - now).days
-                if days < 0:
-                    tariff_label = "⭐ PRO (истёк)"
-                else:
-                    tariff_label = f"⭐ PRO ({days} дн.)"
-            else:
-                tariff_label = "⭐ PRO"
-        else:
-            tariff_label = "🆓 Free"
-
-        # Блокировка
-        blocked = " 🚫" if u.get("bot_blocked") else ""
-
-        # Онбординг
-        onboarding = "" if u.get("onboarded") else " ⚠️не настроен"
-
-        # Дата регистрации
-        registered = u["created_at"].strftime("%d.%m.%Y")
-
-        # Активность
-        if u.get("last_activity"):
-            activity = u["last_activity"].strftime("%d.%m")
-        else:
-            activity = "нет"
-
-        # Статистика
-        stats = f"{u.get('items_count', 0)}📦 / {u.get('tasks_count', 0)}🎯"
-
-        lines.append(
-            f"<b>{label}</b>{blocked}{onboarding}\n"
-            f"  🆔 <code>{u['telegram_id']}</code>\n"
-            f"  {tariff_label} · Рег: {registered}\n"
-            f"  Акт: {activity} · {stats}"
-        )
-
-    if total > 50:
-        lines.append(f"\n<i>… и ещё {total - 50} пользователей</i>")
-
-    text = "\n".join(lines)
-
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(
-        text="🔄 Обновить", callback_data=CB.ADMIN_ALL_USERS,
-    ))
-    builder.row(InlineKeyboardButton(
-        text="🔙 Назад", callback_data=CB.ADMIN_PANEL,
-    ))
-
-    # Если длинно — разбиваем
-    if len(text) > 4000:
-        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
-        for chunk in chunks[:-1]:
-            await callback.message.answer(chunk)
-        await callback.message.edit_text(
-            chunks[-1],
-            reply_markup=builder.as_markup(),
-        )
-    else:
-        await callback.message.edit_text(
-            text,
-            reply_markup=builder.as_markup(),
-        )
-
-    await callback.answer(f"Всего: {total}, PRO: {pro_count}, 🚫: {blocked_count}")
